@@ -524,9 +524,32 @@ class ChargePoint(cp):
                     raise timeout_exception
                 else:
                     continue
+            except asyncio.CancelledError:
+                raise
+            except WebSocketException as ex:
+                _LOGGER.debug(
+                    "monitor_connection websocket closed for '%s': %s", self.id, ex
+                )
+                raise
             except Exception as ex:
-                _LOGGER.debug(f"monitor_connection stopping due to exception: {ex}")
-                break
+                if connection.state is not State.OPEN:
+                    _LOGGER.debug(
+                        "monitor_connection stopping because websocket is %s: %s",
+                        connection.state,
+                        ex,
+                    )
+                    break
+
+                timeout_counter += 1
+                _LOGGER.debug(
+                    "monitor_connection transient error for '%s' (%s/%s): %s",
+                    self.id,
+                    timeout_counter,
+                    self.cs_settings.websocket_ping_tries,
+                    ex,
+                )
+                if timeout_counter > self.cs_settings.websocket_ping_tries:
+                    raise
 
     async def _handle_call(self, msg):
         try:
