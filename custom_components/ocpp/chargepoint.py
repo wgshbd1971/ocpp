@@ -564,10 +564,12 @@ class ChargePoint(cp):
 
     async def run(self, tasks):
         """Run a specified list of tasks."""
-        self.tasks = [asyncio.ensure_future(task) for task in tasks]
+        connection = self._connection
+        run_tasks = [asyncio.ensure_future(task) for task in tasks]
+        self.tasks = run_tasks
         try:
             done, _pending = await asyncio.wait(
-                self.tasks, return_when=asyncio.FIRST_COMPLETED
+                run_tasks, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
                 if task.cancelled():
@@ -605,22 +607,32 @@ class ChargePoint(cp):
                 exc_info=True,
             )
         finally:
-            await self.stop()
-            for task in self.tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            await self.stop(connection=connection, tasks=run_tasks)
 
-    async def stop(self):
+    async def stop(self, connection: ServerConnection | None = None, tasks=None):
         """Close connection and cancel ongoing tasks."""
-        self.status = STATE_UNAVAILABLE
-        async_dispatcher_send(self.hass, DATA_UPDATED)
-        if self._connection.state is State.OPEN:
+        target_connection = connection or self._connection
+        owns_current_connection = target_connection is self._connection
+
+        if owns_current_connection:
+            self.status = STATE_UNAVAILABLE
+            async_dispatcher_send(self.hass, DATA_UPDATED)
+
+        if target_connection.state is State.OPEN:
             _LOGGER.debug(f"Closing websocket to '{self.id}'")
-            await self._connection.close()
-        if self.tasks:
-            for task in self.tasks:
+            await target_connection.close()
+
+        target_tasks = tasks if tasks is not None else self.tasks
+        if target_tasks:
+            current_task = asyncio.current_task()
+            pending_tasks = []
+            for task in target_tasks:
+                if task is current_task:
+                    continue
                 task.cancel()
+                pending_tasks.append(task)
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     async def reconnect(self, connection: ServerConnection):
         """Reconnect charge point."""
