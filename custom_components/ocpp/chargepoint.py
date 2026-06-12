@@ -558,9 +558,7 @@ class ChargePoint(cp):
                 elif isinstance(exception, TimeoutError):
                     pass
                 elif isinstance(exception, WebSocketException):
-                    _LOGGER.debug(
-                        "Connection closed to '%s': %s", self.id, exception
-                    )
+                    _LOGGER.debug("Connection closed to '%s': %s", self.id, exception)
                 else:
                     _LOGGER.error(
                         "Unexpected exception in connection to '%s': '%s'",
