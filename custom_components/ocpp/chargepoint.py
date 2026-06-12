@@ -543,7 +543,35 @@ class ChargePoint(cp):
         """Run a specified list of tasks."""
         self.tasks = [asyncio.ensure_future(task) for task in tasks]
         try:
-            await asyncio.gather(*self.tasks)
+            done, _pending = await asyncio.wait(
+                self.tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                if task.cancelled():
+                    continue
+                exception = task.exception()
+                if exception is None:
+                    _LOGGER.debug(
+                        "Connection task completed for '%s'; closing websocket",
+                        self.id,
+                    )
+                elif isinstance(exception, TimeoutError):
+                    pass
+                elif isinstance(exception, WebSocketException):
+                    _LOGGER.debug("Connection closed to '%s': %s", self.id, exception)
+                else:
+                    _LOGGER.error(
+                        "Unexpected exception in connection to '%s': '%s'",
+                        self.id,
+                        exception,
+                        exc_info=(
+                            type(exception),
+                            exception,
+                            exception.__traceback__,
+                        ),
+                    )
+        except asyncio.CancelledError:
+            raise
         except TimeoutError:
             pass
         except WebSocketException as websocket_exception:
@@ -555,6 +583,10 @@ class ChargePoint(cp):
             )
         finally:
             await self.stop()
+            for task in self.tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*self.tasks, return_exceptions=True)
 
     async def stop(self):
         """Close connection and cancel ongoing tasks."""
