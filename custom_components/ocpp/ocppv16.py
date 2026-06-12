@@ -480,6 +480,8 @@ class ChargePoint(cp):
                 n = 0
             return base + max(0, n)
 
+        cpmax_ok = False
+
         # Try ChargePointMaxProfile (connectorId = 0)
         try:
             req = call.SetChargingProfile(
@@ -496,11 +498,12 @@ class ChargePoint(cp):
             )
             resp = await self.call(req)
             if resp.status == ChargingProfileStatus.accepted:
-                return True
-            _LOGGER.debug(
-                "ChargePointMaxProfile not accepted (%s); will continue.",
-                resp.status,
-            )
+                cpmax_ok = True
+            else:
+                _LOGGER.debug(
+                    "ChargePointMaxProfile not accepted (%s); will continue.",
+                    resp.status,
+                )
         except Exception as ex:
             _LOGGER.debug("ChargePointMaxProfile call raised: %s", ex)
 
@@ -577,7 +580,7 @@ class ChargePoint(cp):
                     f"Note: Active TxProfile applied, but TxDefaultProfile failed: {ex}"
                 )
 
-        return bool(txp_ok or txd_ok)
+        return bool(cpmax_ok or txp_ok or txd_ok)
 
     async def set_availability(self, state: bool = True, connector_id: int | None = 0):
         """Change availability."""

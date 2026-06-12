@@ -3914,10 +3914,8 @@ async def test_set_charge_rate_with_active_transaction(
 
             async def fake_call(req):
                 calls.append(req)
-                # Reject CP-max (connector_id == 0) so code proceeds to TxProfile + TxDefault
-                if getattr(req, "connector_id", None) == 0:
-                    return SimpleNamespace(status=ChargingProfileStatus.rejected)
-                # Accept TxProfile and TxDefaultProfile
+                # Accept CP-max too, but still proceed to TxProfile + TxDefault
+                # so an already-running session is updated.
                 return SimpleNamespace(status=ChargingProfileStatus.accepted)
 
             monkeypatch.setattr(srv, "get_configuration", fake_get_configuration)
@@ -3928,7 +3926,7 @@ async def test_set_charge_rate_with_active_transaction(
             ok = await srv.set_charge_rate(limit_amps=16, conn_id=1)
             assert ok is True
 
-            # We expect 3 calls: CP-max (rejected), TxProfile (accepted), TxDefault (accepted)
+            # We expect 3 calls: CP-max, TxProfile, TxDefault.
             assert len(calls) == 3
             assert getattr(calls[0], "connector_id", None) == 0
             # The rest should target connector 1
