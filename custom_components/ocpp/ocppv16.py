@@ -103,6 +103,10 @@ class ChargePoint(cp):
         )
         self._active_tx: dict[int, int] = {}  # connector_id -> transaction_id
 
+    def _profile_ids_for_connector(self, conn_id: int) -> tuple[int, int]:
+        """Return stable (profile_id, stack_level) for a connector profile."""
+        return 1000 + max(1, int(conn_id)), 1
+
     async def get_number_of_connectors(self) -> int:
         """Return number of connectors on this charger."""
         resp = None
@@ -406,6 +410,26 @@ class ChargePoint(cp):
             _LOGGER.debug("ClearChargingProfile raised %s (ignored)", ex)
             return False
 
+    async def _clear_conflicting_profiles(self, conn_id: int) -> None:
+        """Best-effort cleanup of profiles that can keep Ocular stuck at 0 A."""
+        await self.clear_profile(
+            conn_id=None,
+            purpose=ChargingProfilePurposeType.tx_profile,
+        )
+        await self.clear_profile(
+            conn_id=None,
+            purpose=ChargingProfilePurposeType.tx_default_profile,
+        )
+        if conn_id > 0:
+            await self.clear_profile(
+                conn_id=conn_id,
+                purpose=ChargingProfilePurposeType.tx_profile,
+            )
+            await self.clear_profile(
+                conn_id=conn_id,
+                purpose=ChargingProfilePurposeType.tx_default_profile,
+            )
+
     async def set_charge_rate(
         self,
         limit_amps: int = 32,
@@ -417,12 +441,16 @@ class ChargePoint(cp):
         if profile is not None:
             try:
                 req = call.SetChargingProfile(
-                    connector_id=int(conn_id), cs_charging_profiles=profile
+                    connector_id=int(conn_id),
+                    cs_charging_profiles=profile,
                 )
                 resp = await self.call(req)
                 if resp.status == ChargingProfileStatus.accepted:
                     return True
-                _LOGGER.warning("Custom SetChargingProfile rejected: %s", resp.status)
+                _LOGGER.warning("Failed with response: %s", resp.status)
+                await self.notify_ha(
+                    f"Warning: Set charging profile failed with response {resp.status}"
+                )
             except Exception as ex:
                 _LOGGER.warning("Custom SetChargingProfile failed: %s", ex)
                 await self.notify_ha(
@@ -434,182 +462,97 @@ class ChargePoint(cp):
             _LOGGER.info("Smart charging is not supported by this charger")
             return False
 
-        # Determine allowed unit (default to Amps if not reported)
-        units_resp = await self.get_configuration(
+        resp_units = await self.get_configuration(
             ckey.charging_schedule_allowed_charging_rate_unit.value
         )
-        if not units_resp:
-            _LOGGER.debug("Charging rate unit not reported; assuming Amps")
-            units_resp = om.current.value
+        if resp_units is None:
+            _LOGGER.warning("Failed to query charging rate unit, assuming Amps")
+            resp_units = om.current.value
 
-        use_amps = om.current.value in units_resp
-        limit_value = float(limit_amps if use_amps else limit_watts)
-        units_value = (
+        use_amps = om.current.value in resp_units
+        limit_val = float(limit_amps if use_amps else limit_watts)
+        unit_val = (
             ChargingRateUnitType.amps.value
             if use_amps
             else ChargingRateUnitType.watts.value
         )
 
-        try:
-            stack_level_resp = await self.get_configuration(
+        conn_id = int(conn_id or 0)
+        is_station_level = conn_id == 0
+
+        if is_station_level:
+            purpose = ChargingProfilePurposeType.charge_point_max_profile
+            resp_stack = await self.get_configuration(
                 ckey.charge_profile_max_stack_level.value
             )
-            stack_level = int(stack_level_resp)
-        except Exception:
-            stack_level = 1
-
-        # Helper to build a simple relative schedule with one period
-        def _mk_schedule(_units: str, _limit: float) -> dict:
-            return {
-                om.charging_rate_unit.value: _units,
-                om.charging_schedule_period.value: [
-                    {om.start_period.value: 0, om.limit.value: _limit}
-                ],
-            }
-
-        # Helper to generate a unique, stable chargingProfileId per purpose+connector
-        def _profile_id(purpose: str, cid: int) -> int:
-            base = {
-                ChargingProfilePurposeType.charge_point_max_profile.value: 1000,
-                ChargingProfilePurposeType.tx_default_profile.value: 2000,
-                ChargingProfilePurposeType.tx_profile.value: 3000,
-            }.get(purpose, 9000)
             try:
-                n = int(cid or 0)
+                stack_level = int(resp_stack)
             except Exception:
-                n = 0
-            return base + max(0, n)
+                stack_level = 1
+            profile_id = 8
+        else:
+            purpose = ChargingProfilePurposeType.tx_default_profile
+            profile_id, stack_level = self._profile_ids_for_connector(conn_id)
 
-        # Target connector (default 1 if unspecified/0)
-        target_cid = int(conn_id) if conn_id and int(conn_id) > 0 else 1
+        is_default = (limit_amps >= 32) and (limit_watts >= 22000)
+        if is_default:
+            _LOGGER.info(
+                "Clearing all charge profiles for '%s' to restore full current",
+                self.id,
+            )
+            return await self.clear_profile()
 
-        # Read active transaction on this connector
-        try:
-            active_tx_id = int(self._active_tx.get(target_cid, 0) or 0)
-        except Exception:
-            active_tx_id = 0
+        if is_station_level and limit_val > 0:
+            await self._clear_conflicting_profiles(conn_id)
 
-        txp_ok = False
-        txd_ok = False
-        cpmax_ok = False
+        cs_profile = {
+            om.charging_profile_id.value: profile_id,
+            om.stack_level.value: stack_level,
+            om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
+            om.charging_profile_purpose.value: purpose.value,
+            om.charging_schedule.value: {
+                om.charging_rate_unit.value: unit_val,
+                om.charging_schedule_period.value: [
+                    {om.start_period.value: 0, om.limit.value: limit_val}
+                ],
+            },
+        }
 
         _LOGGER.info(
-            "Setting charge rate for '%s': connector=%s limit=%s%s active_tx=%s",
+            "Setting charge rate for '%s': connector=%s profile_id=%s purpose=%s limit=%s%s",
             self.id,
-            target_cid,
-            limit_value,
-            units_value,
-            active_tx_id,
+            conn_id,
+            profile_id,
+            purpose.value,
+            limit_val,
+            unit_val,
         )
 
-        # If an active transaction exists on this connector, try TxProfile first (affects ongoing charging)
-        if active_tx_id > 0:
-            try:
-                txp_stack = max(1, stack_level)  # keep same or higher than defaults
-                req = call.SetChargingProfile(
-                    connector_id=target_cid,
-                    cs_charging_profiles={
-                        om.charging_profile_id.value: _profile_id(
-                            ChargingProfilePurposeType.tx_profile.value, target_cid
-                        ),
-                        om.stack_level.value: txp_stack,
-                        om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
-                        om.charging_profile_purpose.value: ChargingProfilePurposeType.tx_profile.value,
-                        om.charging_schedule.value: _mk_schedule(
-                            units_value, limit_value
-                        ),
-                        # Bind to the ongoing transaction
-                        om.transaction_id.value: active_tx_id,
-                    },
-                )
-                resp = await self.call(req)
-                if resp.status == ChargingProfileStatus.accepted:
-                    _LOGGER.info(
-                        "Set TxProfile accepted for '%s' connector=%s limit=%s%s",
-                        self.id,
-                        target_cid,
-                        limit_value,
-                        units_value,
-                    )
-                    txp_ok = True
-                else:
-                    _LOGGER.warning("TxProfile not accepted (%s).", resp.status)
-            except Exception as ex:
-                _LOGGER.warning("TxProfile call raised: %s.", ex)
+        req = call.SetChargingProfile(
+            connector_id=conn_id,
+            cs_charging_profiles=cs_profile,
+        )
+        resp = await self.call(req)
+        if resp.status == ChargingProfileStatus.accepted:
+            return True
 
-        # Always attempt TxDefaultProfile as well (for future sessions)
-        try:
-            tx_stack = max(
-                1, stack_level - 1
-            )  # slightly lower to avoid overriding TxProfile
-            req = call.SetChargingProfile(
-                connector_id=target_cid,
-                cs_charging_profiles={
-                    om.charging_profile_id.value: _profile_id(
-                        ChargingProfilePurposeType.tx_default_profile.value, target_cid
-                    ),
-                    om.stack_level.value: tx_stack,
-                    om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
-                    om.charging_profile_purpose.value: ChargingProfilePurposeType.tx_default_profile.value,
-                    om.charging_schedule.value: _mk_schedule(units_value, limit_value),
-                },
+        if is_station_level and resp.status != ChargingProfileStatus.accepted:
+            _LOGGER.debug("Station profile rejected, trying lower stack level")
+            cs_profile[om.stack_level.value] = max(1, stack_level - 1)
+            resp = await self.call(
+                call.SetChargingProfile(
+                    connector_id=0,
+                    cs_charging_profiles=cs_profile,
+                )
             )
-            resp = await self.call(req)
             if resp.status == ChargingProfileStatus.accepted:
-                _LOGGER.info(
-                    "Set TxDefaultProfile accepted for '%s' connector=%s limit=%s%s",
-                    self.id,
-                    target_cid,
-                    limit_value,
-                    units_value,
-                )
-                txd_ok = True
-            else:
-                _LOGGER.warning("Set TxDefaultProfile rejected: %s", resp.status)
-                if txp_ok:
-                    _LOGGER.warning(
-                        f"Note: Active TxProfile applied, but TxDefaultProfile was rejected ({resp.status})."
-                    )
-        except Exception as ex:
-            _LOGGER.warning("Set TxDefaultProfile failed: %s", ex)
-            if txp_ok:
-                _LOGGER.warning(
-                    f"Note: Active TxProfile applied, but TxDefaultProfile failed: {ex}"
-                )
+                return True
 
-        # Try ChargePointMaxProfile last. Ocular accepts this, but it may not affect
-        # an active charging session, so it must not prevent connector profiles.
-        try:
-            req = call.SetChargingProfile(
-                connector_id=0,
-                cs_charging_profiles={
-                    om.charging_profile_id.value: _profile_id(
-                        ChargingProfilePurposeType.charge_point_max_profile.value, 0
-                    ),
-                    om.stack_level.value: stack_level,
-                    om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
-                    om.charging_profile_purpose.value: ChargingProfilePurposeType.charge_point_max_profile.value,
-                    om.charging_schedule.value: _mk_schedule(units_value, limit_value),
-                },
-            )
-            resp = await self.call(req)
-            if resp.status == ChargingProfileStatus.accepted:
-                _LOGGER.info(
-                    "Set ChargePointMaxProfile accepted for '%s' limit=%s%s",
-                    self.id,
-                    limit_value,
-                    units_value,
-                )
-                cpmax_ok = True
-            else:
-                _LOGGER.warning(
-                    "ChargePointMaxProfile not accepted (%s); will continue.",
-                    resp.status,
-                )
-        except Exception as ex:
-            _LOGGER.warning("ChargePointMaxProfile call raised: %s", ex)
-
-        return bool(cpmax_ok or txp_ok or txd_ok)
+        _LOGGER.warning("Failed with response: %s", resp.status)
+        await self.notify_ha(
+            f"Warning: Set charging profile failed with response {resp.status}"
+        )
+        return False
 
     async def set_availability(self, state: bool = True, connector_id: int | None = 0):
         """Change availability."""
