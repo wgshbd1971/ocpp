@@ -3224,8 +3224,6 @@ async def test_post_connect_returns_when_already_completed(
     """post_connect is idempotent once setup has completed."""
     cs: CentralSystem = setup_config_entry
 
-    from custom_components.ocpp.ocppv16 import ChargePoint as ServerCP
-
     async with websockets.connect(
         f"ws://127.0.0.1:{port}/{cp_id}", subprotocols=["ocpp1.6"]
     ) as ws:
