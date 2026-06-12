@@ -3926,12 +3926,11 @@ async def test_set_charge_rate_with_active_transaction(
             ok = await srv.set_charge_rate(limit_amps=16, conn_id=1)
             assert ok is True
 
-            # We expect 3 calls: CP-max, TxProfile, TxDefault.
+            # We expect 3 calls: TxProfile, TxDefault, CP-max.
             assert len(calls) == 3
-            assert getattr(calls[0], "connector_id", None) == 0
-            # The rest should target connector 1
+            assert getattr(calls[0], "connector_id", None) == 1
             assert getattr(calls[1], "connector_id", None) == 1
-            assert getattr(calls[2], "connector_id", None) == 1
+            assert getattr(calls[2], "connector_id", None) == 0
 
         finally:
             task.cancel()

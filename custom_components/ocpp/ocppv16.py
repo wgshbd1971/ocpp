@@ -480,33 +480,6 @@ class ChargePoint(cp):
                 n = 0
             return base + max(0, n)
 
-        cpmax_ok = False
-
-        # Try ChargePointMaxProfile (connectorId = 0)
-        try:
-            req = call.SetChargingProfile(
-                connector_id=0,
-                cs_charging_profiles={
-                    om.charging_profile_id.value: _profile_id(
-                        ChargingProfilePurposeType.charge_point_max_profile.value, 0
-                    ),
-                    om.stack_level.value: stack_level,
-                    om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
-                    om.charging_profile_purpose.value: ChargingProfilePurposeType.charge_point_max_profile.value,
-                    om.charging_schedule.value: _mk_schedule(units_value, limit_value),
-                },
-            )
-            resp = await self.call(req)
-            if resp.status == ChargingProfileStatus.accepted:
-                cpmax_ok = True
-            else:
-                _LOGGER.debug(
-                    "ChargePointMaxProfile not accepted (%s); will continue.",
-                    resp.status,
-                )
-        except Exception as ex:
-            _LOGGER.debug("ChargePointMaxProfile call raised: %s", ex)
-
         # Target connector (default 1 if unspecified/0)
         target_cid = int(conn_id) if conn_id and int(conn_id) > 0 else 1
 
@@ -518,6 +491,16 @@ class ChargePoint(cp):
 
         txp_ok = False
         txd_ok = False
+        cpmax_ok = False
+
+        _LOGGER.info(
+            "Setting charge rate for '%s': connector=%s limit=%s%s active_tx=%s",
+            self.id,
+            target_cid,
+            limit_value,
+            units_value,
+            active_tx_id,
+        )
 
         # If an active transaction exists on this connector, try TxProfile first (affects ongoing charging)
         if active_tx_id > 0:
@@ -541,11 +524,18 @@ class ChargePoint(cp):
                 )
                 resp = await self.call(req)
                 if resp.status == ChargingProfileStatus.accepted:
+                    _LOGGER.info(
+                        "Set TxProfile accepted for '%s' connector=%s limit=%s%s",
+                        self.id,
+                        target_cid,
+                        limit_value,
+                        units_value,
+                    )
                     txp_ok = True
                 else:
-                    _LOGGER.debug("TxProfile not accepted (%s).", resp.status)
+                    _LOGGER.warning("TxProfile not accepted (%s).", resp.status)
             except Exception as ex:
-                _LOGGER.debug("TxProfile call raised: %s.", ex)
+                _LOGGER.warning("TxProfile call raised: %s.", ex)
 
         # Always attempt TxDefaultProfile as well (for future sessions)
         try:
@@ -566,19 +556,58 @@ class ChargePoint(cp):
             )
             resp = await self.call(req)
             if resp.status == ChargingProfileStatus.accepted:
+                _LOGGER.info(
+                    "Set TxDefaultProfile accepted for '%s' connector=%s limit=%s%s",
+                    self.id,
+                    target_cid,
+                    limit_value,
+                    units_value,
+                )
                 txd_ok = True
             else:
-                _LOGGER.debug("Set TxDefaultProfile rejected: %s", resp.status)
+                _LOGGER.warning("Set TxDefaultProfile rejected: %s", resp.status)
                 if txp_ok:
-                    _LOGGER.debug(
+                    _LOGGER.warning(
                         f"Note: Active TxProfile applied, but TxDefaultProfile was rejected ({resp.status})."
                     )
         except Exception as ex:
-            _LOGGER.debug("Set TxDefaultProfile failed: %s", ex)
+            _LOGGER.warning("Set TxDefaultProfile failed: %s", ex)
             if txp_ok:
-                _LOGGER.debug(
+                _LOGGER.warning(
                     f"Note: Active TxProfile applied, but TxDefaultProfile failed: {ex}"
                 )
+
+        # Try ChargePointMaxProfile last. Ocular accepts this, but it may not affect
+        # an active charging session, so it must not prevent connector profiles.
+        try:
+            req = call.SetChargingProfile(
+                connector_id=0,
+                cs_charging_profiles={
+                    om.charging_profile_id.value: _profile_id(
+                        ChargingProfilePurposeType.charge_point_max_profile.value, 0
+                    ),
+                    om.stack_level.value: stack_level,
+                    om.charging_profile_kind.value: ChargingProfileKindType.relative.value,
+                    om.charging_profile_purpose.value: ChargingProfilePurposeType.charge_point_max_profile.value,
+                    om.charging_schedule.value: _mk_schedule(units_value, limit_value),
+                },
+            )
+            resp = await self.call(req)
+            if resp.status == ChargingProfileStatus.accepted:
+                _LOGGER.info(
+                    "Set ChargePointMaxProfile accepted for '%s' limit=%s%s",
+                    self.id,
+                    limit_value,
+                    units_value,
+                )
+                cpmax_ok = True
+            else:
+                _LOGGER.warning(
+                    "ChargePointMaxProfile not accepted (%s); will continue.",
+                    resp.status,
+                )
+        except Exception as ex:
+            _LOGGER.warning("ChargePointMaxProfile call raised: %s", ex)
 
         return bool(cpmax_ok or txp_ok or txd_ok)
 
