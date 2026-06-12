@@ -175,6 +175,23 @@ async def test_run_handles_timeout_and_other_exception(
             # Other exception path -> should be logged via L540–541 and then stop() called again.
             await srv.run([raises_other()])
             assert stopped["count"] >= 2
+
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def completes_normally():
+                await started.wait()
+
+            async def waits_forever():
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            await srv.run([completes_normally(), waits_forever()])
+            assert stopped["count"] >= 3
+            assert cancelled.is_set()
         finally:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
