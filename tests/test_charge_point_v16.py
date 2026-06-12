@@ -3413,10 +3413,10 @@ async def test_post_connect_trigger_status_notification_raises_outer_caught(
 )
 @pytest.mark.parametrize("cp_id", ["CP_postconn_ex_6"])
 @pytest.mark.parametrize("port", [9125])
-async def test_post_connect_update_entry_raises_outer_caught(
+async def test_post_connect_does_not_update_config_entry(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """Outer try: async_update_entry raises -> swallowed, success flag not set."""
+    """post_connect avoids config-entry writes that reload the live websocket."""
     cs: CentralSystem = setup_config_entry
 
     from custom_components.ocpp.ocppv16 import ChargePoint as ServerCP
@@ -3453,7 +3453,7 @@ async def test_post_connect_update_entry_raises_outer_caught(
             srv_cp = cs.charge_points[cp_id]
 
             def boom_update_entry(entry, data=None):
-                raise RuntimeError("update failed")
+                raise AssertionError("post_connect should not update the config entry")
 
             monkeypatch.setattr(
                 srv_cp.hass.config_entries,
@@ -3463,7 +3463,7 @@ async def test_post_connect_update_entry_raises_outer_caught(
             )
 
             await srv_cp.post_connect()
-            assert getattr(srv_cp, "post_connect_success", False) is not True
+            assert getattr(srv_cp, "post_connect_success", False) is True
         finally:
             task.cancel()
 
