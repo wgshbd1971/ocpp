@@ -266,6 +266,7 @@ class ChargePoint(cp):
         self.triggered_boot_notification = False
         self.received_boot_notification = False
         self.post_connect_success = False
+        self.availability_startup_success = False
         self._post_connect_lock = asyncio.Lock()
         self.tasks = None
         self._charger_reports_session_energy = False
@@ -329,9 +330,25 @@ class ChargePoint(cp):
         async with self._post_connect_lock:
             if self.post_connect_success:
                 _LOGGER.debug("'%s' post connection setup already completed", self.id)
+                await self._ensure_startup_availability()
+                self.hass.async_create_task(self.update(self.settings.cpid))
                 return
 
             await self._post_connect()
+
+    async def _ensure_startup_availability(self):
+        """Keep the charger explicitly operative after startup/reconnect."""
+        if self.availability_startup_success:
+            return
+
+        try:
+            self.availability_startup_success = await self.set_availability()
+            if not self.availability_startup_success:
+                _LOGGER.debug("post_connect: startup availability was not accepted")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            _LOGGER.debug("post_connect: set_availability ignored error: %s", ex)
 
     async def _post_connect(self):
         """Run post-connect setup once for the lifetime of this charge point."""
@@ -351,13 +368,7 @@ class ChargePoint(cp):
             self.post_connect_success = True
             _LOGGER.debug("'%s' post connection setup completed successfully", self.id)
 
-            # Keep the charger explicitly operative on startup, but treat failures as non-fatal.
-            try:
-                await self.set_availability()
-            except asyncio.CancelledError:
-                raise
-            except Exception as ex:
-                _LOGGER.debug("post_connect: set_availability ignored error: %s", ex)
+            await self._ensure_startup_availability()
 
             # Ensure HA states are correct immediately after connection
             self.hass.async_create_task(self.update(self.settings.cpid))
