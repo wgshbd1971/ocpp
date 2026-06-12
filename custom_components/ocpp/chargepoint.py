@@ -1,7 +1,6 @@
 """Common classes for charge points of all OCPP versions."""
 
 import asyncio
-from copy import deepcopy
 from collections import defaultdict
 from collections.abc import MutableMapping
 from dataclasses import dataclass
@@ -52,9 +51,7 @@ from .const import (
     CONF_AUTH_STATUS,
     CONF_DEFAULT_AUTH_STATUS,
     CONF_ID_TAG,
-    CONF_MONITORED_VARIABLES,
     CONF_NUM_CONNECTORS,
-    CONF_CPIDS,
     CONFIG,
     DATA_UPDATED,
     DEFAULT_ENERGY_UNIT,
@@ -347,24 +344,7 @@ class ChargePoint(cp):
             self._metrics[(0, cdet.connectors.value)].value = self.num_connectors
             await self.get_heartbeat_interval()
 
-            accepted_measurands: str = await self.get_supported_measurands()
-            updated_entry = deepcopy(self.entry.data)
-            entry_changed = False
-            for i in range(len(updated_entry[CONF_CPIDS])):
-                if self.id in updated_entry[CONF_CPIDS][i]:
-                    s = updated_entry[CONF_CPIDS][i][self.id]
-                    if s.get(CONF_MONITORED_VARIABLES) != accepted_measurands or s.get(
-                        CONF_NUM_CONNECTORS
-                    ) != int(self.num_connectors):
-                        s[CONF_MONITORED_VARIABLES] = accepted_measurands
-                        s[CONF_NUM_CONNECTORS] = int(self.num_connectors)
-                        entry_changed = True
-                    break
-            # if an entry differs this will unload/reload and stop/restart the central system/websocket
-            if entry_changed:
-                self.hass.config_entries.async_update_entry(
-                    self.entry, data=updated_entry
-                )
+            await self.get_supported_measurands()
 
             await self.set_standard_configuration()
 
