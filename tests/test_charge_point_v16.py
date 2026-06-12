@@ -3133,7 +3133,7 @@ async def test_post_connect_fetch_supported_features_raises(
 async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_called(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """Inner try around set_availability: generic Exception swallowed, and REM triggers still called."""
+    """set_availability failures are swallowed, and REM triggers still run."""
     cs: CentralSystem = setup_config_entry
 
     # Patch server CP methods before connecting.
@@ -3218,40 +3218,11 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
 )
 @pytest.mark.parametrize("cp_id", ["CP_postconn_ex_3"])
 @pytest.mark.parametrize("port", [9122])
-async def test_post_connect_set_availability_cancelled_bubbles(
+async def test_post_connect_returns_when_already_completed(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """Inner try around set_availability: asyncio.CancelledError must be re-raised (not swallowed)."""
+    """post_connect is idempotent once setup has completed."""
     cs: CentralSystem = setup_config_entry
-
-    from custom_components.ocpp.ocppv16 import ChargePoint as ServerCP
-
-    async def ok_fetch(self):
-        return None
-
-    async def ok_get_n(self):
-        return 1
-
-    async def ok_hb(self):
-        return 300
-
-    async def ok_meas(self):
-        return "Voltage"
-
-    async def ok_set_std(self):
-        return None
-
-    async def cancelled(self):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(ServerCP, "fetch_supported_features", ok_fetch, raising=True)
-    monkeypatch.setattr(ServerCP, "get_number_of_connectors", ok_get_n, raising=True)
-    monkeypatch.setattr(ServerCP, "get_heartbeat_interval", ok_hb, raising=True)
-    monkeypatch.setattr(ServerCP, "get_supported_measurands", ok_meas, raising=True)
-    monkeypatch.setattr(
-        ServerCP, "set_standard_configuration", ok_set_std, raising=True
-    )
-    monkeypatch.setattr(ServerCP, "set_availability", cancelled, raising=True)
 
     async with websockets.connect(
         f"ws://127.0.0.1:{port}/{cp_id}", subprotocols=["ocpp1.6"]
@@ -3266,11 +3237,14 @@ async def test_post_connect_set_availability_cancelled_bubbles(
                     break
                 await asyncio.sleep(0.02)
             srv_cp = cs.charge_points[cp_id]
-            srv_cp._attr_supported_features = {prof.REM}
-            srv_cp.received_boot_notification = False
+            srv_cp.post_connect_success = True
 
-            with pytest.raises(asyncio.CancelledError):
-                await srv_cp.post_connect()
+            async def fail_if_called():
+                raise AssertionError("_post_connect should not run again")
+
+            monkeypatch.setattr(srv_cp, "_post_connect", fail_if_called, raising=True)
+
+            await srv_cp.post_connect()
         finally:
             task.cancel()
 
@@ -3439,10 +3413,10 @@ async def test_post_connect_trigger_status_notification_raises_outer_caught(
 )
 @pytest.mark.parametrize("cp_id", ["CP_postconn_ex_6"])
 @pytest.mark.parametrize("port", [9125])
-async def test_post_connect_update_entry_raises_outer_caught(
+async def test_post_connect_does_not_update_config_entry(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """Outer try: async_update_entry raises -> swallowed, success flag not set."""
+    """post_connect avoids config-entry writes that reload the live websocket."""
     cs: CentralSystem = setup_config_entry
 
     from custom_components.ocpp.ocppv16 import ChargePoint as ServerCP
@@ -3479,7 +3453,7 @@ async def test_post_connect_update_entry_raises_outer_caught(
             srv_cp = cs.charge_points[cp_id]
 
             def boom_update_entry(entry, data=None):
-                raise RuntimeError("update failed")
+                raise AssertionError("post_connect should not update the config entry")
 
             monkeypatch.setattr(
                 srv_cp.hass.config_entries,
@@ -3489,7 +3463,7 @@ async def test_post_connect_update_entry_raises_outer_caught(
             )
 
             await srv_cp.post_connect()
-            assert getattr(srv_cp, "post_connect_success", False) is not True
+            assert getattr(srv_cp, "post_connect_success", False) is True
         finally:
             task.cancel()
 

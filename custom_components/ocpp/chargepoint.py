@@ -51,9 +51,7 @@ from .const import (
     CONF_AUTH_STATUS,
     CONF_DEFAULT_AUTH_STATUS,
     CONF_ID_TAG,
-    CONF_MONITORED_VARIABLES,
     CONF_NUM_CONNECTORS,
-    CONF_CPIDS,
     CONFIG,
     DATA_UPDATED,
     DEFAULT_ENERGY_UNIT,
@@ -268,6 +266,7 @@ class ChargePoint(cp):
         self.triggered_boot_notification = False
         self.received_boot_notification = False
         self.post_connect_success = False
+        self._post_connect_lock = asyncio.Lock()
         self.tasks = None
         self._charger_reports_session_energy = False
 
@@ -323,6 +322,19 @@ class ChargePoint(cp):
 
     async def post_connect(self):
         """Logic to be executed right after a charger connects."""
+        if self._post_connect_lock.locked():
+            _LOGGER.debug("'%s' post connection setup already running", self.id)
+            return
+
+        async with self._post_connect_lock:
+            if self.post_connect_success:
+                _LOGGER.debug("'%s' post connection setup already completed", self.id)
+                return
+
+            await self._post_connect()
+
+    async def _post_connect(self):
+        """Run post-connect setup once for the lifetime of this charge point."""
         try:
             self.status = STATE_OK
             await self.fetch_supported_features()
@@ -332,27 +344,14 @@ class ChargePoint(cp):
             self._metrics[(0, cdet.connectors.value)].value = self.num_connectors
             await self.get_heartbeat_interval()
 
-            accepted_measurands: str = await self.get_supported_measurands()
-            updated_entry = {**self.entry.data}
-            for i in range(len(updated_entry[CONF_CPIDS])):
-                if self.id in updated_entry[CONF_CPIDS][i]:
-                    s = updated_entry[CONF_CPIDS][i][self.id]
-                    if s.get(CONF_MONITORED_VARIABLES) != accepted_measurands or s.get(
-                        CONF_NUM_CONNECTORS
-                    ) != int(self.num_connectors):
-                        s[CONF_MONITORED_VARIABLES] = accepted_measurands
-                        s[CONF_NUM_CONNECTORS] = int(self.num_connectors)
-                    break
-            # if an entry differs this will unload/reload and stop/restart the central system/websocket
-            self.hass.config_entries.async_update_entry(self.entry, data=updated_entry)
+            await self.get_supported_measurands()
 
             await self.set_standard_configuration()
 
             self.post_connect_success = True
             _LOGGER.debug("'%s' post connection setup completed successfully", self.id)
 
-            # nice to have, but not needed for integration to function
-            # and can cause issues with some chargers
+            # Keep the charger explicitly operative on startup, but treat failures as non-fatal.
             try:
                 await self.set_availability()
             except asyncio.CancelledError:
