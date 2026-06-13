@@ -605,12 +605,17 @@ class ChargePoint(cp):
         finally:
             await self.stop(connection=connection, tasks=run_tasks)
 
-    async def stop(self, connection: ServerConnection | None = None, tasks=None):
+    async def stop(
+        self,
+        connection: ServerConnection | None = None,
+        tasks=None,
+        mark_unavailable: bool = True,
+    ):
         """Close connection and cancel ongoing tasks."""
         target_connection = connection or self._connection
         owns_current_connection = target_connection is self._connection
 
-        if owns_current_connection:
+        if owns_current_connection and mark_unavailable:
             self.status = STATE_UNAVAILABLE
             async_dispatcher_send(self.hass, DATA_UPDATED)
 
@@ -634,9 +639,15 @@ class ChargePoint(cp):
         """Reconnect charge point."""
         _LOGGER.debug(f"Reconnect websocket to {self.id}")
 
-        await self.stop()
-        self.status = STATE_OK
+        old_connection = self._connection
+        old_tasks = self.tasks
         self._connection = connection
+        self.status = STATE_OK
+        await self.stop(
+            connection=old_connection,
+            tasks=old_tasks,
+            mark_unavailable=False,
+        )
         self._metrics[(0, cstat.reconnects.value)].value += 1
         self.hass.async_create_task(self.update(self.settings.cpid))
         # post connect now handled on receiving boot notification or with backstop in monitor connection
