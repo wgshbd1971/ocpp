@@ -1,19 +1,13 @@
-<!-- This is top level document for the github Wiki -->
+# Ocular OCPP Home Assistant Fork
 
-![OCPP](https://github.com/home-assistant/brands/raw/master/custom_integrations/ocpp/icon.png)
+This fork is for an Ocular `OC20-BC-7kW-PLUS-V3` / Ocular 7kW Lite Plus charger
+running against Home Assistant as a local OCPP 1.6 central system.
 
-OCPP is a Home Assistant integration for Electric Vehicle chargers that support the Open Charge Point Protocol.
+It is manually installed and is not HACS-supported.
 
-The Wiki contents is automatically generated from the [docs](https://github.com/lbbrhzn/ocpp/tree/main/docs) folder.
-It is also published on [readthedocs](https://home-assistant-ocpp.readthedocs.io)
+## Contents
 
-Contents
-========
-<!-- links within the wiki should not use a file extension! -->
-* [Installation](installation)
-* [Supported devices](supported-devices)
-* [User guide](user-guide)
-* [Support](support)
-* [Development](development)
-* [Debugging](debugging)
+- [Installation](installation.md)
+- [Supported device](supported-devices.md)
+- [Debugging](debugging.md)
 
