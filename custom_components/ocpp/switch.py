@@ -237,6 +237,13 @@ class ChargePointSwitch(SwitchEntity):
             resp = self.central_system.get_metric(
                 self.cpid, self.entity_description.metric_state, metric_conn
             )
+            if (
+                self.entity_description.key == "availability"
+                and resp not in self.entity_description.metric_condition
+            ):
+                resp = self.central_system.get_metric(
+                    self.cpid, HAChargerStatuses.status_connector.value, 1
+                )
             if self.entity_description.metric_condition is not None:
                 self._state = resp in self.entity_description.metric_condition
             else:
