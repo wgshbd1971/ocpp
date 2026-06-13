@@ -78,6 +78,49 @@ def _mk_cp(hass, *, version=OcppVersion.V201):
     return cp
 
 
+def test_abort_stale_connection_aborts_open_transport(hass):
+    """Test stale websocket cleanup aborts a wedged transport."""
+    cp = _mk_cp(hass)
+
+    class Transport:
+        def __init__(self):
+            self.aborted = False
+
+        def is_closing(self):
+            return False
+
+        def abort(self):
+            self.aborted = True
+
+    transport = Transport()
+    connection = SimpleNamespace(state=State.CLOSED, transport=transport)
+
+    cp._abort_stale_connection(connection)
+
+    assert transport.aborted is True
+
+
+def test_abort_stale_connection_skips_closing_transport(hass):
+    """Test stale websocket cleanup ignores transports already closing."""
+    cp = _mk_cp(hass)
+
+    class Transport:
+        aborted = False
+
+        def is_closing(self):
+            return True
+
+        def abort(self):
+            self.aborted = True
+
+    transport = Transport()
+    connection = SimpleNamespace(state=State.CLOSED, transport=transport)
+
+    cp._abort_stale_connection(connection)
+
+    assert transport.aborted is False
+
+
 def test_connector_aware_metrics_core():
     """Test _ConnectorAwareMetrics API."""
     m = CAM()

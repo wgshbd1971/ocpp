@@ -622,6 +622,8 @@ class ChargePoint(cp):
         if target_connection.state is State.OPEN:
             _LOGGER.debug(f"Closing websocket to '{self.id}'")
             await target_connection.close()
+        else:
+            self._abort_stale_connection(target_connection)
 
         target_tasks = tasks if tasks is not None else self.tasks
         if target_tasks:
@@ -634,6 +636,19 @@ class ChargePoint(cp):
                 pending_tasks.append(task)
             if pending_tasks:
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    def _abort_stale_connection(self, connection: ServerConnection):
+        """Release a broken websocket transport if the client vanished untidily."""
+        transport = getattr(connection, "transport", None)
+        if transport is None or transport.is_closing():
+            return
+
+        _LOGGER.debug(
+            "Aborting stale websocket to '%s' in state %s",
+            self.id,
+            connection.state,
+        )
+        transport.abort()
 
     async def reconnect(self, connection: ServerConnection):
         """Reconnect charge point."""
