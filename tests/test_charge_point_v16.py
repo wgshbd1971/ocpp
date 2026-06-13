@@ -43,6 +43,7 @@ from ocpp.v16.enums import (
     ChargePointErrorCode,
     ChargePointStatus,
     ChargingProfileStatus,
+    ChargingProfilePurposeType,
     ClearChargingProfileStatus,
     ConfigurationStatus,
     DataTransferStatus,
@@ -3133,7 +3134,7 @@ async def test_post_connect_fetch_supported_features_raises(
 async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_called(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """set_availability failures are swallowed, and REM triggers still run."""
+    """set_availability failures are swallowed during quiet startup."""
     cs: CentralSystem = setup_config_entry
 
     # Patch server CP methods before connecting.
@@ -3157,14 +3158,6 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
     async def nope_avail(self):
         raise ValueError("availability failed")
 
-    called = {"boot": 0, "status": 0}
-
-    async def fake_boot(self):
-        called["boot"] += 1
-
-    async def fake_status(self):
-        called["status"] += 1
-
     monkeypatch.setattr(ServerCP, "fetch_supported_features", ok_fetch, raising=True)
     monkeypatch.setattr(ServerCP, "get_number_of_connectors", ok_get_n, raising=True)
     monkeypatch.setattr(ServerCP, "get_heartbeat_interval", ok_hb, raising=True)
@@ -3173,10 +3166,6 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
         ServerCP, "set_standard_configuration", ok_set_std, raising=True
     )
     monkeypatch.setattr(ServerCP, "set_availability", nope_avail, raising=True)
-    monkeypatch.setattr(ServerCP, "trigger_boot_notification", fake_boot, raising=True)
-    monkeypatch.setattr(
-        ServerCP, "trigger_status_notification", fake_status, raising=True
-    )
 
     async with websockets.connect(
         f"ws://127.0.0.1:{port}/{cp_id}", subprotocols=["ocpp1.6"]
@@ -3201,8 +3190,7 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
             await srv_cp.post_connect()
 
             assert getattr(srv_cp, "post_connect_success", False) is True
-            assert called["boot"] == 1
-            assert called["status"] == 1
+            assert getattr(srv_cp, "availability_startup_success", False) is False
         finally:
             task.cancel()
 
@@ -3885,7 +3873,7 @@ async def test_eair_monotonic_increments_single_connector(
 async def test_set_charge_rate_with_active_transaction(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """Ensure set_charge_rate uses TxProfile for ongoing session and also attempts TxDefaultProfile."""
+    """Ensure connector charge-rate requests use TxDefaultProfile."""
     cs = setup_config_entry
     async with websockets.connect(
         f"ws://127.0.0.1:{port}/{cp_id}", subprotocols=["ocpp1.6"]
@@ -3905,19 +3893,12 @@ async def test_set_charge_rate_with_active_transaction(
                 # units: pretend charger supports Amps
                 if key == ckey.charging_schedule_allowed_charging_rate_unit.value:
                     return "A"  # same as om.current.value
-                # stack level
-                if key == ckey.charge_profile_max_stack_level.value:
-                    return "2"
                 return ""
 
             calls = []
 
             async def fake_call(req):
                 calls.append(req)
-                # Reject CP-max (connector_id == 0) so code proceeds to TxProfile + TxDefault
-                if getattr(req, "connector_id", None) == 0:
-                    return SimpleNamespace(status=ChargingProfileStatus.rejected)
-                # Accept TxProfile and TxDefaultProfile
                 return SimpleNamespace(status=ChargingProfileStatus.accepted)
 
             monkeypatch.setattr(srv, "get_configuration", fake_get_configuration)
@@ -3928,12 +3909,12 @@ async def test_set_charge_rate_with_active_transaction(
             ok = await srv.set_charge_rate(limit_amps=16, conn_id=1)
             assert ok is True
 
-            # We expect 3 calls: CP-max (rejected), TxProfile (accepted), TxDefault (accepted)
-            assert len(calls) == 3
-            assert getattr(calls[0], "connector_id", None) == 0
-            # The rest should target connector 1
-            assert getattr(calls[1], "connector_id", None) == 1
-            assert getattr(calls[2], "connector_id", None) == 1
+            assert len(calls) == 1
+            assert getattr(calls[0], "connector_id", None) == 1
+            assert (
+                calls[0].cs_charging_profiles["chargingProfilePurpose"]
+                == ChargingProfilePurposeType.tx_default_profile.value
+            )
 
         finally:
             task.cancel()
@@ -3968,19 +3949,12 @@ async def test_set_charge_rate_exception_paths(
             # Make sure there is an active transaction on connector 1
             await client.send_start_transaction(0)
 
-            # Case A: CP-max raises, TxProfile raises, TxDefault succeeds → overall True
+            # Case A: TxDefault succeeds -> overall True
             call_count = 0
 
             async def fake_call_case_a(req):
                 nonlocal call_count
                 call_count += 1
-                # 1st call (CP-max) → raise
-                if call_count == 1:
-                    raise RuntimeError("cp-max boom")
-                # 2nd call (TxProfile) → raise
-                if call_count == 2:
-                    raise RuntimeError("tx-profile boom")
-                # 3rd call (TxDefault) → accept
                 return SimpleNamespace(status=ChargingProfileStatus.accepted)
 
             # Ensure smart charging available
@@ -3989,8 +3963,6 @@ async def test_set_charge_rate_exception_paths(
             async def fake_get_configuration(key: str = "") -> str:
                 if key == ckey.charging_schedule_allowed_charging_rate_unit.value:
                     return "A"
-                if key == ckey.charge_profile_max_stack_level.value:
-                    return "2"
                 return ""
 
             monkeypatch.setattr(srv, "get_configuration", fake_get_configuration)
@@ -3998,9 +3970,9 @@ async def test_set_charge_rate_exception_paths(
             monkeypatch.setattr(srv, "call", fake_call_case_a)
             ok_a = await srv.set_charge_rate(limit_amps=10, conn_id=1)
             assert ok_a is True
-            assert call_count == 3  # hit all branches
+            assert call_count == 1
 
-            # Case B: CP-max raises, TxProfile raises, TxDefault raises → overall False
+            # Case B: TxDefault raises -> exception bubbles out like the original path.
             call_count_b = 0
 
             async def fake_call_case_b(req):
@@ -4009,9 +3981,9 @@ async def test_set_charge_rate_exception_paths(
                 raise RuntimeError(f"boom-{call_count_b}")
 
             monkeypatch.setattr(srv, "call", fake_call_case_b)
-            ok_b = await srv.set_charge_rate(limit_amps=12, conn_id=1)
-            assert ok_b is False
-            assert call_count_b >= 2  # at least CP-max + TxProfile tried
+            with pytest.raises(RuntimeError):
+                await srv.set_charge_rate(limit_amps=12, conn_id=1)
+            assert call_count_b == 1
 
             # Case C: Custom profile branch raises → returns False
             async def fake_call_custom(req):

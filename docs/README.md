@@ -1,16 +1,14 @@
-This folder contains all the documentation. Changes are automatically updated to [readthedocs](https://home-assistant-ocpp.readthedocs.io) and the
-[wiki](https://github.com/lbbrhzn/ocpp/wiki).
+# Documentation
 
-The toplevel file for readthedocs is [index.rst](index.rst)
+These notes are for this Ocular-specific Home Assistant fork.
 
-The toplevel file for the wiki is [Home.md](Home.md)
+This documentation is not published to Read the Docs or a GitHub wiki. The
+repository is intended to be read directly.
 
-Contents
-========
-* [Installation](installation.md)
-* [Supported devices](supported-devices.md)
-* [User guide](user-guide.md)
-* [Support](support.md)
-* [Development](development.md)
-* [Debugging](debugging.md)
+## Contents
+
+- [Home](Home.md)
+- [Installation](installation.md)
+- [Supported device](supported-devices.md)
+- [Debugging](debugging.md)
 

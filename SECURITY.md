@@ -1,9 +1,19 @@
 # Security Policy
 
-This integration is intended for personal use only.
-The integration supports secure connections, but does not perform any validation of client connections.
+This fork is intended for a private Home Assistant installation with a local
+Ocular/Broadview charger.
 
-## Reporting a Vulnerability
+The integration can listen for local OCPP websocket traffic. Treat the OCPP
+port as trusted LAN-only unless you have deliberately configured and tested a
+secure deployment.
 
-Reporting a vulnerability can be done by creating an issue at:
-](https://github.com/lbbrhzn/ocpp/issues)https://github.com/lbbrhzn/ocpp/issues
+## Reporting Issues
+
+For issues with this Ocular-specific fork, use this repository.
+
+For general OCPP integration security or compatibility concerns, use the
+upstream project:
+
+```text
+https://github.com/lbbrhzn/ocpp
+```

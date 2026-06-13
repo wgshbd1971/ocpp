@@ -18,7 +18,9 @@ from custom_components.ocpp.enums import (
     Profiles as prof,
     ConfigurationKey as ckey,
 )
+from ocpp.v16 import call
 from ocpp.v16.enums import (
+    ClearChargingProfileStatus,
     ChargingProfileStatus,
     ChargingProfilePurposeType,
     ChargingProfileKindType,
@@ -36,6 +38,7 @@ def cp_v16():
     # What set_charge_rate reads:
     cp._attr_supported_features = prof.SMART  # can be overridden in tests
     cp._ocpp_version = "1.6"
+    cp.id = "test_cp"
     cp.active_transaction_id = 0
     cp._active_tx = {}
     # set_charge_rate calls these (we’ll monkeypatch per-test):
@@ -115,24 +118,17 @@ async def test_smart_charging_not_supported_returns_false_no_notify(
 
 
 @pytest.mark.asyncio
-async def test_cpmax_exception_falls_back_to_txdefault_accepted_returns_true(
-    cp_v16, monkeypatch
-):
-    """3) CPMax path raises -> fallback to TxDefault which is accepted -> return True."""
+async def test_connector_txdefault_accepted_returns_true(cp_v16, monkeypatch):
+    """3) Connector charge-rate requests use TxDefaultProfile."""
 
-    # Allow both A and stack level
     async def fake_get_conf(key: str):
         if key == ckey.charging_schedule_allowed_charging_rate_unit.value:
             return "Current"  # supports Amps
-        if key == ckey.charge_profile_max_stack_level.value:
-            return "2"
         pytest.fail(f"Unexpected get_configuration key: {key}")
 
-    # First SetChargingProfile (CPMax connectorId=0) raises, second (TxDefault connectorId=2) accepted
     async def fake_call(req):
         purpose = req.cs_charging_profiles["chargingProfilePurpose"]
-        if purpose == ChargingProfilePurposeType.charge_point_max_profile.value:
-            raise RuntimeError("transport error")
+        assert req.connector_id == 2
         if purpose == ChargingProfilePurposeType.tx_default_profile.value:
             return SimpleNamespace(status=ChargingProfileStatus.accepted)
         return SimpleNamespace(status=ChargingProfileStatus.rejected)
@@ -154,8 +150,8 @@ async def test_cpmax_exception_falls_back_to_txdefault_accepted_returns_true(
 
 
 @pytest.mark.asyncio
-async def test_cpmax_rejected_txdefault_accepted_returns_true(cp_v16, monkeypatch):
-    """4) CPMax rejected -> TxDefault accepted -> return True."""
+async def test_station_profile_retries_lower_stack_level(cp_v16, monkeypatch):
+    """4) Station profile retries with a lower stack level when rejected."""
 
     async def fake_get_conf(key: str):
         if key == ckey.charging_schedule_allowed_charging_rate_unit.value:
@@ -164,13 +160,17 @@ async def test_cpmax_rejected_txdefault_accepted_returns_true(cp_v16, monkeypatc
             return "3"
         pytest.fail(f"Unexpected get_configuration key: {key}")
 
+    calls = []
+
     async def fake_call(req):
-        purpose = req.cs_charging_profiles["chargingProfilePurpose"]
-        if purpose == ChargingProfilePurposeType.charge_point_max_profile.value:
+        if isinstance(req, call.ClearChargingProfile):
+            return SimpleNamespace(status=ClearChargingProfileStatus.accepted)
+
+        calls.append(req)
+        assert req.connector_id == 0
+        if len(calls) == 1:
             return SimpleNamespace(status=ChargingProfileStatus.rejected)
-        if purpose == ChargingProfilePurposeType.tx_default_profile.value:
-            return SimpleNamespace(status=ChargingProfileStatus.accepted)
-        return SimpleNamespace(status=ChargingProfileStatus.rejected)
+        return SimpleNamespace(status=ChargingProfileStatus.accepted)
 
     notices = []
 
@@ -182,6 +182,7 @@ async def test_cpmax_rejected_txdefault_accepted_returns_true(cp_v16, monkeypatc
     monkeypatch.setattr(cp_v16, "call", fake_call)
     monkeypatch.setattr(cp_v16, "notify_ha", fake_notify)
 
-    ok = await cp_v16.set_charge_rate(limit_amps=10, conn_id=2)
+    ok = await cp_v16.set_charge_rate(limit_amps=10, conn_id=0)
     assert ok is True
+    assert len(calls) == 2
     assert notices == []

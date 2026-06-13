@@ -266,6 +266,7 @@ class ChargePoint(cp):
         self.triggered_boot_notification = False
         self.received_boot_notification = False
         self.post_connect_success = False
+        self.availability_startup_success = False
         self._post_connect_lock = asyncio.Lock()
         self.tasks = None
         self._charger_reports_session_energy = False
@@ -329,9 +330,25 @@ class ChargePoint(cp):
         async with self._post_connect_lock:
             if self.post_connect_success:
                 _LOGGER.debug("'%s' post connection setup already completed", self.id)
+                await self._ensure_startup_availability()
+                self.hass.async_create_task(self.update(self.settings.cpid))
                 return
 
             await self._post_connect()
+
+    async def _ensure_startup_availability(self):
+        """Keep the charger explicitly operative after startup/reconnect."""
+        if self.availability_startup_success:
+            return
+
+        try:
+            self.availability_startup_success = await self.set_availability()
+            if not self.availability_startup_success:
+                _LOGGER.debug("post_connect: startup availability was not accepted")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            _LOGGER.debug("post_connect: set_availability ignored error: %s", ex)
 
     async def _post_connect(self):
         """Run post-connect setup once for the lifetime of this charge point."""
@@ -351,28 +368,7 @@ class ChargePoint(cp):
             self.post_connect_success = True
             _LOGGER.debug("'%s' post connection setup completed successfully", self.id)
 
-            # Keep the charger explicitly operative on startup, but treat failures as non-fatal.
-            try:
-                await self.set_availability()
-            except asyncio.CancelledError:
-                raise
-            except Exception as ex:
-                _LOGGER.debug("post_connect: set_availability ignored error: %s", ex)
-
-            if prof.REM in self._attr_supported_features:
-                if self.received_boot_notification is False:
-                    try:
-                        await asyncio.wait_for(
-                            self.trigger_boot_notification(), timeout=3
-                        )
-                    except Exception as ex:
-                        _LOGGER.debug("trigger_boot_notification ignored: %s", ex)
-                try:
-                    await asyncio.wait_for(
-                        self.trigger_status_notification(), timeout=3
-                    )
-                except Exception as ex:
-                    _LOGGER.debug("trigger_status_notification ignored: %s", ex)
+            await self._ensure_startup_availability()
 
             # Ensure HA states are correct immediately after connection
             self.hass.async_create_task(self.update(self.settings.cpid))
@@ -524,9 +520,32 @@ class ChargePoint(cp):
                     raise timeout_exception
                 else:
                     continue
+            except asyncio.CancelledError:
+                raise
+            except WebSocketException as ex:
+                _LOGGER.debug(
+                    "monitor_connection websocket closed for '%s': %s", self.id, ex
+                )
+                raise
             except Exception as ex:
-                _LOGGER.debug(f"monitor_connection stopping due to exception: {ex}")
-                break
+                if connection.state is not State.OPEN:
+                    _LOGGER.debug(
+                        "monitor_connection stopping because websocket is %s: %s",
+                        connection.state,
+                        ex,
+                    )
+                    break
+
+                timeout_counter += 1
+                _LOGGER.debug(
+                    "monitor_connection transient error for '%s' (%s/%s): %s",
+                    self.id,
+                    timeout_counter,
+                    self.cs_settings.websocket_ping_tries,
+                    ex,
+                )
+                if timeout_counter > self.cs_settings.websocket_ping_tries:
+                    raise
 
     async def _handle_call(self, msg):
         try:
@@ -541,10 +560,12 @@ class ChargePoint(cp):
 
     async def run(self, tasks):
         """Run a specified list of tasks."""
-        self.tasks = [asyncio.ensure_future(task) for task in tasks]
+        connection = self._connection
+        run_tasks = [asyncio.ensure_future(task) for task in tasks]
+        self.tasks = run_tasks
         try:
             done, _pending = await asyncio.wait(
-                self.tasks, return_when=asyncio.FIRST_COMPLETED
+                run_tasks, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
                 if task.cancelled():
@@ -582,30 +603,51 @@ class ChargePoint(cp):
                 exc_info=True,
             )
         finally:
-            await self.stop()
-            for task in self.tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+            await self.stop(connection=connection, tasks=run_tasks)
 
-    async def stop(self):
+    async def stop(
+        self,
+        connection: ServerConnection | None = None,
+        tasks=None,
+        mark_unavailable: bool = True,
+    ):
         """Close connection and cancel ongoing tasks."""
-        self.status = STATE_UNAVAILABLE
-        async_dispatcher_send(self.hass, DATA_UPDATED)
-        if self._connection.state is State.OPEN:
+        target_connection = connection or self._connection
+        owns_current_connection = target_connection is self._connection
+
+        if owns_current_connection and mark_unavailable:
+            self.status = STATE_UNAVAILABLE
+            async_dispatcher_send(self.hass, DATA_UPDATED)
+
+        if target_connection.state is State.OPEN:
             _LOGGER.debug(f"Closing websocket to '{self.id}'")
-            await self._connection.close()
-        if self.tasks:
-            for task in self.tasks:
+            await target_connection.close()
+
+        target_tasks = tasks if tasks is not None else self.tasks
+        if target_tasks:
+            current_task = asyncio.current_task()
+            pending_tasks = []
+            for task in target_tasks:
+                if task is current_task:
+                    continue
                 task.cancel()
+                pending_tasks.append(task)
+            if pending_tasks:
+                await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     async def reconnect(self, connection: ServerConnection):
         """Reconnect charge point."""
         _LOGGER.debug(f"Reconnect websocket to {self.id}")
 
-        await self.stop()
-        self.status = STATE_OK
+        old_connection = self._connection
+        old_tasks = self.tasks
         self._connection = connection
+        self.status = STATE_OK
+        await self.stop(
+            connection=old_connection,
+            tasks=old_tasks,
+            mark_unavailable=False,
+        )
         self._metrics[(0, cstat.reconnects.value)].value += 1
         self.hass.async_create_task(self.update(self.settings.cpid))
         # post connect now handled on receiving boot notification or with backstop in monitor connection
