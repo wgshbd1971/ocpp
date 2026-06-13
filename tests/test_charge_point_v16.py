@@ -43,6 +43,7 @@ from ocpp.v16.enums import (
     ChargePointErrorCode,
     ChargePointStatus,
     ChargingProfileStatus,
+    ChargingProfilePurposeType,
     ClearChargingProfileStatus,
     ConfigurationStatus,
     DataTransferStatus,
@@ -3133,7 +3134,7 @@ async def test_post_connect_fetch_supported_features_raises(
 async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_called(
     hass, socket_enabled, cp_id, port, setup_config_entry, monkeypatch
 ):
-    """set_availability failures are swallowed, and REM triggers still run."""
+    """set_availability failures are swallowed during quiet startup."""
     cs: CentralSystem = setup_config_entry
 
     # Patch server CP methods before connecting.
@@ -3157,14 +3158,6 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
     async def nope_avail(self):
         raise ValueError("availability failed")
 
-    called = {"boot": 0, "status": 0}
-
-    async def fake_boot(self):
-        called["boot"] += 1
-
-    async def fake_status(self):
-        called["status"] += 1
-
     monkeypatch.setattr(ServerCP, "fetch_supported_features", ok_fetch, raising=True)
     monkeypatch.setattr(ServerCP, "get_number_of_connectors", ok_get_n, raising=True)
     monkeypatch.setattr(ServerCP, "get_heartbeat_interval", ok_hb, raising=True)
@@ -3173,10 +3166,6 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
         ServerCP, "set_standard_configuration", ok_set_std, raising=True
     )
     monkeypatch.setattr(ServerCP, "set_availability", nope_avail, raising=True)
-    monkeypatch.setattr(ServerCP, "trigger_boot_notification", fake_boot, raising=True)
-    monkeypatch.setattr(
-        ServerCP, "trigger_status_notification", fake_status, raising=True
-    )
 
     async with websockets.connect(
         f"ws://127.0.0.1:{port}/{cp_id}", subprotocols=["ocpp1.6"]
@@ -3201,8 +3190,7 @@ async def test_post_connect_set_availability_error_swallowed_and_REM_triggers_ca
             await srv_cp.post_connect()
 
             assert getattr(srv_cp, "post_connect_success", False) is True
-            assert called["boot"] == 1
-            assert called["status"] == 1
+            assert getattr(srv_cp, "availability_startup_success", False) is False
         finally:
             task.cancel()
 

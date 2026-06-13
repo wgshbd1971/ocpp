@@ -1149,6 +1149,7 @@ async def _extra_features_test(
 ):
     cp_id = cp.id[:-7]
     cpid = cs.charge_points[cp_id].settings.cpid
+    cp.triggered_status_notification.clear()
 
     await cp.call(
         call.BootNotification(
@@ -1173,10 +1174,7 @@ async def _extra_features_test(
         | Profiles.REM
     )
 
-    while len(cp.triggered_status_notification) < 1:
-        await asyncio.sleep(0.1)
-    assert cp.triggered_status_notification[0].id == 1
-    assert cp.triggered_status_notification[0].connector_id == 1
+    assert cp.triggered_status_notification == []
 
 
 class ChargePointReportUnsupported(ChargePointAllFeatures):

@@ -155,7 +155,7 @@ async def test_run_handles_timeout_and_other_exception(
 
             stopped = {"count": 0}
 
-            async def fake_stop():
+            async def fake_stop(**kwargs):
                 stopped["count"] += 1
 
             monkeypatch.setattr(srv, "stop", fake_stop, raising=True)

@@ -118,9 +118,7 @@ async def test_smart_charging_not_supported_returns_false_no_notify(
 
 
 @pytest.mark.asyncio
-async def test_connector_txdefault_accepted_returns_true(
-    cp_v16, monkeypatch
-):
+async def test_connector_txdefault_accepted_returns_true(cp_v16, monkeypatch):
     """3) Connector charge-rate requests use TxDefaultProfile."""
 
     async def fake_get_conf(key: str):
