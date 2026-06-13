@@ -499,8 +499,11 @@ class CentralSystem:
         if cp is None:
             return None
 
+        recently_seen = getattr(cp, "is_recently_seen", lambda: False)
+        backend_ok = cp.status == STATE_OK or recently_seen()
+
         if self._norm_conn(connector_id) == 0:
-            return cp.status == STATE_OK
+            return backend_ok
 
         status_val = None
         with contextlib.suppress(Exception):
@@ -519,7 +522,7 @@ class CentralSystem:
                 pass
 
         if not status_val:
-            return cp.status == STATE_OK
+            return backend_ok
 
         ok_statuses_norm = {
             "available",
@@ -534,8 +537,7 @@ class CentralSystem:
         }
 
         ret = _norm(status_val) in ok_statuses_norm
-        # If backend/WS is down, entity should be unavailable regardless.
-        return ret and (cp.status == STATE_OK)
+        return ret and backend_ok
 
     def get_supported_features(self, id: str):
         """Return what profiles the charger supports."""

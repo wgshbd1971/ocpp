@@ -2,12 +2,14 @@
 
 import asyncio
 import math
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from websockets.protocol import State
 
+from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
 from homeassistant.setup import async_setup_component
 
 from custom_components.ocpp.chargepoint import (
@@ -21,6 +23,7 @@ from custom_components.ocpp.const import (
     DOMAIN,
     CentralSystemSettings,
     ChargerSystemSettings,
+    DEFAULT_LIVENESS_GRACE_PERIOD,
     DEFAULT_ENERGY_UNIT,
     DEFAULT_POWER_UNIT,
     HA_ENERGY_UNIT,
@@ -119,6 +122,26 @@ def test_abort_stale_connection_skips_closing_transport(hass):
     cp._abort_stale_connection(connection)
 
     assert transport.aborted is False
+
+
+def test_mark_ocpp_message_restores_liveness(hass):
+    """Test valid charger traffic restores connection liveness."""
+    cp = _mk_cp(hass)
+    cp.status = STATE_UNAVAILABLE
+    cp._last_ocpp_message_at = 0
+
+    cp._mark_ocpp_message()
+
+    assert cp.status == STATE_OK
+    assert cp.is_recently_seen() is True
+
+
+def test_recently_seen_expires(hass):
+    """Test liveness grace period expires after stale traffic."""
+    cp = _mk_cp(hass)
+    cp._last_ocpp_message_at = time.monotonic() - DEFAULT_LIVENESS_GRACE_PERIOD - 1
+
+    assert cp.is_recently_seen() is False
 
 
 def test_connector_aware_metrics_core():

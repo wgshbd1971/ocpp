@@ -55,6 +55,7 @@ from .const import (
     CONFIG,
     DATA_UPDATED,
     DEFAULT_ENERGY_UNIT,
+    DEFAULT_LIVENESS_GRACE_PERIOD,
     DEFAULT_NUM_CONNECTORS,
     DEFAULT_POWER_UNIT,
     DEFAULT_MEASURAND,
@@ -270,6 +271,7 @@ class ChargePoint(cp):
         self._post_connect_lock = asyncio.Lock()
         self.tasks = None
         self._charger_reports_session_energy = False
+        self._last_ocpp_message_at = time.monotonic()
 
         # Connector-aware, but backwards compatible:
         self._metrics: _ConnectorAwareMetrics = _ConnectorAwareMetrics()
@@ -299,6 +301,10 @@ class ChargePoint(cp):
 
     async def get_heartbeat_interval(self):
         """Retrieve heartbeat interval from the charger and store it."""
+        pass
+
+    async def request_heartbeat_interval(self):
+        """Request a shorter charger heartbeat interval if supported."""
         pass
 
     async def get_supported_measurands(self) -> str:
@@ -360,6 +366,7 @@ class ChargePoint(cp):
                 self._init_connector_slots(conn)
             self._metrics[(0, cdet.connectors.value)].value = self.num_connectors
             await self.get_heartbeat_interval()
+            await self.request_heartbeat_interval()
 
             await self.get_supported_measurands()
 
@@ -459,11 +466,25 @@ class ChargePoint(cp):
         # This code 'unsilences' CallErrors by raising them as exception
         # upon receiving.
         resp = await super()._get_specific_response(unique_id, timeout)
+        self._mark_ocpp_message()
 
         if isinstance(resp, CallError):
             raise resp.to_exception()
 
         return resp
+
+    def _mark_ocpp_message(self) -> None:
+        """Record that the charger sent a valid OCPP frame."""
+        self._last_ocpp_message_at = time.monotonic()
+        if self.status == STATE_UNAVAILABLE:
+            self.status = STATE_OK
+
+    def is_recently_seen(self) -> bool:
+        """Return true while recent valid OCPP traffic proves the charger is alive."""
+        return (
+            time.monotonic() - self._last_ocpp_message_at
+            <= DEFAULT_LIVENESS_GRACE_PERIOD
+        )
 
     async def monitor_connection(self):
         """Monitor the connection, by measuring the connection latency."""
@@ -549,6 +570,7 @@ class ChargePoint(cp):
 
     async def _handle_call(self, msg):
         try:
+            self._mark_ocpp_message()
             await super()._handle_call(msg)
         except NotImplementedError as e:
             response = msg.create_call_error(e).to_json()
