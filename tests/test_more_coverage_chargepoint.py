@@ -157,6 +157,11 @@ async def test_run_handles_timeout_and_other_exception(
 
             async def fake_stop(**kwargs):
                 stopped["count"] += 1
+                for stop_task in kwargs.get("tasks") or []:
+                    stop_task.cancel()
+                await asyncio.gather(
+                    *(kwargs.get("tasks") or []), return_exceptions=True
+                )
 
             monkeypatch.setattr(srv, "stop", fake_stop, raising=True)
 
