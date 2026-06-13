@@ -67,7 +67,15 @@ SWITCHES: Final[list[OcppSwitchDescription]] = [
         on_action=HAChargerServices.service_availability.name,
         off_action=HAChargerServices.service_availability.name,
         metric_state=HAChargerStatuses.status.value,  # charger-level status
-        metric_condition=[ChargePointStatus.available.value],
+        metric_condition=[
+            ChargePointStatus.available.value,
+            ChargePointStatus.preparing.value,
+            ChargePointStatus.charging.value,
+            ChargePointStatus.suspended_evse.value,
+            ChargePointStatus.suspended_ev.value,
+            ChargePointStatus.finishing.value,
+            ChargePointStatus.reserved.value,
+        ],
         default_state=True,
         per_connector=False,
     ),
