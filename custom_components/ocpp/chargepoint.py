@@ -585,6 +585,7 @@ class ChargePoint(cp):
         connection = self._connection
         run_tasks = [asyncio.ensure_future(task) for task in tasks]
         self.tasks = run_tasks
+        close_reason = "connection_task_cleanup"
         try:
             done, _pending = await asyncio.wait(
                 run_tasks, return_when=asyncio.FIRST_COMPLETED
@@ -594,18 +595,34 @@ class ChargePoint(cp):
                     continue
                 exception = task.exception()
                 if exception is None:
+                    close_reason = "connection_task_completed"
                     _LOGGER.debug(
-                        "Connection task completed for '%s'; closing websocket",
+                        "Connection task completed for '%s'; close_reason=%s",
                         self.id,
+                        close_reason,
                     )
                 elif isinstance(exception, TimeoutError):
-                    pass
-                elif isinstance(exception, WebSocketException):
-                    _LOGGER.debug("Connection closed to '%s': %s", self.id, exception)
-                else:
-                    _LOGGER.error(
-                        "Unexpected exception in connection to '%s': '%s'",
+                    close_reason = "ping_timeout"
+                    _LOGGER.debug(
+                        "Connection task timed out for '%s'; close_reason=%s",
                         self.id,
+                        close_reason,
+                    )
+                elif isinstance(exception, WebSocketException):
+                    close_reason = f"websocket_exception:{type(exception).__name__}"
+                    _LOGGER.debug(
+                        "Connection closed to '%s'; close_reason=%s; exception=%s",
+                        self.id,
+                        close_reason,
+                        exception,
+                    )
+                else:
+                    close_reason = f"unexpected_exception:{type(exception).__name__}"
+                    _LOGGER.error(
+                        "Unexpected exception in connection to '%s'; "
+                        "close_reason=%s; exception='%s'",
+                        self.id,
+                        close_reason,
                         exception,
                         exc_info=(
                             type(exception),
@@ -616,22 +633,38 @@ class ChargePoint(cp):
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            pass
+            close_reason = "run_timeout"
         except WebSocketException as websocket_exception:
-            _LOGGER.debug(f"Connection closed to '{self.id}': {websocket_exception}")
+            close_reason = (
+                f"run_websocket_exception:{type(websocket_exception).__name__}"
+            )
+            _LOGGER.debug(
+                "Connection closed to '%s'; close_reason=%s; exception=%s",
+                self.id,
+                close_reason,
+                websocket_exception,
+            )
         except Exception as other_exception:
+            close_reason = f"run_unexpected_exception:{type(other_exception).__name__}"
             _LOGGER.error(
-                f"Unexpected exception in connection to '{self.id}': '{other_exception}'",
+                "Unexpected exception in connection to '%s'; "
+                "close_reason=%s; exception='%s'",
+                self.id,
+                close_reason,
+                other_exception,
                 exc_info=True,
             )
         finally:
-            await self.stop(connection=connection, tasks=run_tasks)
+            await self.stop(
+                connection=connection, tasks=run_tasks, close_reason=close_reason
+            )
 
     async def stop(
         self,
         connection: ServerConnection | None = None,
         tasks=None,
         mark_unavailable: bool = True,
+        close_reason: str = "unspecified",
     ):
         """Close connection and cancel ongoing tasks."""
         target_connection = connection or self._connection
@@ -642,10 +675,15 @@ class ChargePoint(cp):
             async_dispatcher_send(self.hass, DATA_UPDATED)
 
         if target_connection.state is State.OPEN:
-            _LOGGER.debug(f"Closing websocket to '{self.id}'")
+            _LOGGER.debug(
+                "Closing websocket to '%s'; close_reason=%s; owns_current_connection=%s",
+                self.id,
+                close_reason,
+                owns_current_connection,
+            )
             await target_connection.close()
         else:
-            self._abort_stale_connection(target_connection)
+            self._abort_stale_connection(target_connection, close_reason=close_reason)
 
         target_tasks = tasks if tasks is not None else self.tasks
         if target_tasks:
@@ -659,15 +697,18 @@ class ChargePoint(cp):
             if pending_tasks:
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
 
-    def _abort_stale_connection(self, connection: ServerConnection):
+    def _abort_stale_connection(
+        self, connection: ServerConnection, close_reason: str = "unspecified"
+    ):
         """Release a broken websocket transport if the client vanished untidily."""
         transport = getattr(connection, "transport", None)
         if transport is None or transport.is_closing():
             return
 
         _LOGGER.debug(
-            "Aborting stale websocket to '%s' in state %s",
+            "Aborting stale websocket to '%s'; close_reason=%s; state=%s",
             self.id,
+            close_reason,
             connection.state,
         )
         transport.abort()
@@ -684,6 +725,7 @@ class ChargePoint(cp):
             connection=old_connection,
             tasks=old_tasks,
             mark_unavailable=False,
+            close_reason="replaced_by_new_connection",
         )
         self._metrics[(0, cstat.reconnects.value)].value += 1
         self.hass.async_create_task(self.update(self.settings.cpid))

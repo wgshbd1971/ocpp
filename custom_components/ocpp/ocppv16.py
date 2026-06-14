@@ -707,9 +707,11 @@ class ChargePoint(cp):
     async def reset(self, typ: str = ResetType.hard):
         """Hard reset charger unless soft reset requested."""
         self._metrics[0][cstat.reconnects.value].value = 0
+        _LOGGER.info("Sending OCPP Reset to '%s' with type=%s", self.id, typ)
         req = call.Reset(typ)
         resp = await self.call(req)
         if resp.status == ResetStatus.accepted:
+            _LOGGER.info("OCPP Reset accepted by '%s' with type=%s", self.id, typ)
             return True
         else:
             _LOGGER.warning("Failed with response: %s", resp.status)

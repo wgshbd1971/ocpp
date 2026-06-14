@@ -578,17 +578,19 @@ class CentralSystem:
                 resp = await self.charge_points[cp_id].set_availability(
                     state, connector_id=connector_id
                 )
-            if service_name == csvcs.service_charge_start.name:
+            elif service_name == csvcs.service_charge_start.name:
                 resp = await self.charge_points[cp_id].start_transaction(
                     connector_id=connector_id
                 )
-            if service_name == csvcs.service_charge_stop.name:
+            elif service_name == csvcs.service_charge_stop.name:
                 resp = await self.charge_points[cp_id].stop_transaction(
                     connector_id=connector_id
                 )
-            if service_name == csvcs.service_reset.name:
+            elif service_name == csvcs.service_reset.name:
                 resp = await self.charge_points[cp_id].reset()
-            if service_name == csvcs.service_unlock.name:
+            elif service_name == csvcs.service_soft_reset.name:
+                resp = await self.charge_points[cp_id].reset("Soft")
+            elif service_name == csvcs.service_unlock.name:
                 resp = await self.charge_points[cp_id].unlock(connector_id=connector_id)
         return resp
 
