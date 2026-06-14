@@ -56,6 +56,7 @@ from .const import (
     CentralSystemSettings,
     ChargerSystemSettings,
     DEFAULT_MEASURAND,
+    DEFAULT_HEARTBEAT_INTERVAL,
     HA_ENERGY_UNIT,
     MEASURANDS,
 )
@@ -151,6 +152,27 @@ class ChargePoint(cp):
     async def get_heartbeat_interval(self):
         """Retrieve heartbeat interval from the charger and store it."""
         await self.get_configuration(ckey.heartbeat_interval.value)
+
+    async def request_heartbeat_interval(self):
+        """Ask the charger for a practical heartbeat interval."""
+        try:
+            result = await self.configure(
+                ckey.heartbeat_interval.value, str(DEFAULT_HEARTBEAT_INTERVAL)
+            )
+            if result in ("Unknown", None):
+                return
+            _LOGGER.debug(
+                "Requested HeartbeatInterval=%s for %s: %s",
+                DEFAULT_HEARTBEAT_INTERVAL,
+                self.id,
+                result,
+            )
+        except Exception as ex:
+            _LOGGER.debug(
+                "HeartbeatInterval request ignored for '%s': %s",
+                self.id,
+                ex,
+            )
 
     async def get_supported_measurands(self) -> str:
         """Get comma-separated list of measurands supported by the charger."""
@@ -685,9 +707,11 @@ class ChargePoint(cp):
     async def reset(self, typ: str = ResetType.hard):
         """Hard reset charger unless soft reset requested."""
         self._metrics[0][cstat.reconnects.value].value = 0
+        _LOGGER.info("Sending OCPP Reset to '%s' with type=%s", self.id, typ)
         req = call.Reset(typ)
         resp = await self.call(req)
         if resp.status == ResetStatus.accepted:
+            _LOGGER.info("OCPP Reset accepted by '%s' with type=%s", self.id, typ)
             return True
         else:
             _LOGGER.warning("Failed with response: %s", resp.status)
@@ -1004,7 +1028,7 @@ class ChargePoint(cp):
         """Handle a boot notification."""
         resp = call_result.BootNotification(
             current_time=datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            interval=3600,
+            interval=DEFAULT_HEARTBEAT_INTERVAL,
             status=RegistrationStatus.accepted.value,
         )
         self.received_boot_notification = True

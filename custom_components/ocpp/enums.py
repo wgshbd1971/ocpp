@@ -12,6 +12,7 @@ class HAChargerServices(str, Enum):
     service_availability = "availability"
     service_set_charge_rate = "set_charge_rate"
     service_reset = "reset"
+    service_soft_reset = "soft_reset"
     service_unlock = "unlock"
     service_update_firmware = "update_firmware"
     service_configure = "configure"

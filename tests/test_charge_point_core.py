@@ -2,18 +2,21 @@
 
 import asyncio
 import math
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from websockets.protocol import State
 
+from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
 from homeassistant.setup import async_setup_component
 
 from custom_components.ocpp.chargepoint import (
     ChargePoint,
     OcppVersion,
     Metric,
+    OcppTrafficStaleError,
     _ConnectorAwareMetrics as CAM,
     MeasurandValue,
 )
@@ -21,6 +24,8 @@ from custom_components.ocpp.const import (
     DOMAIN,
     CentralSystemSettings,
     ChargerSystemSettings,
+    DEFAULT_LIVENESS_GRACE_PERIOD,
+    DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
     DEFAULT_ENERGY_UNIT,
     DEFAULT_POWER_UNIT,
     HA_ENERGY_UNIT,
@@ -76,6 +81,102 @@ def _mk_cp(hass, *, version=OcppVersion.V201):
     cp = ChargePoint("CP_A", conn, version, hass, entry, centr, chg)
     cp._metrics[(0, csess.meter_start.value)].value = None
     return cp
+
+
+def test_abort_stale_connection_aborts_open_transport(hass):
+    """Test stale websocket cleanup aborts a wedged transport."""
+    cp = _mk_cp(hass)
+
+    class Transport:
+        def __init__(self):
+            self.aborted = False
+
+        def is_closing(self):
+            return False
+
+        def abort(self):
+            self.aborted = True
+
+    transport = Transport()
+    connection = SimpleNamespace(state=State.CLOSED, transport=transport)
+
+    cp._abort_stale_connection(connection)
+
+    assert transport.aborted is True
+
+
+def test_abort_stale_connection_skips_closing_transport(hass):
+    """Test stale websocket cleanup ignores transports already closing."""
+    cp = _mk_cp(hass)
+
+    class Transport:
+        aborted = False
+
+        def is_closing(self):
+            return True
+
+        def abort(self):
+            self.aborted = True
+
+    transport = Transport()
+    connection = SimpleNamespace(state=State.CLOSED, transport=transport)
+
+    cp._abort_stale_connection(connection)
+
+    assert transport.aborted is False
+
+
+def test_mark_ocpp_message_restores_liveness(hass):
+    """Test valid charger traffic restores connection liveness."""
+    cp = _mk_cp(hass)
+    cp.status = STATE_UNAVAILABLE
+    cp._last_ocpp_message_at = 0
+
+    cp._mark_ocpp_message()
+
+    assert cp.status == STATE_OK
+    assert cp.is_recently_seen() is True
+
+
+def test_recently_seen_expires(hass):
+    """Test liveness grace period expires after stale traffic."""
+    cp = _mk_cp(hass)
+    cp._last_ocpp_message_at = time.monotonic() - DEFAULT_LIVENESS_GRACE_PERIOD - 1
+
+    assert cp.is_recently_seen() is False
+
+
+def test_ocpp_traffic_stale_period_has_floor(hass):
+    """Test stale OCPP traffic timeout is conservative by default."""
+    cp = _mk_cp(hass)
+
+    assert cp._ocpp_traffic_stale_period() == DEFAULT_OCPP_TRAFFIC_STALE_PERIOD
+
+
+def test_ocpp_traffic_stale_period_scales_with_ping_interval(hass):
+    """Test stale OCPP traffic timeout scales for slower ping intervals."""
+    cp = _mk_cp(hass)
+    cp.cs_settings.websocket_ping_interval = 100
+
+    assert cp._ocpp_traffic_stale_period() == 300
+
+
+def test_raise_if_ocpp_traffic_stale_raises(hass):
+    """Test stale OCPP traffic forces a reconnect path."""
+    cp = _mk_cp(hass)
+    cp._last_ocpp_message_at = (
+        time.monotonic() - DEFAULT_OCPP_TRAFFIC_STALE_PERIOD - 1
+    )
+
+    with pytest.raises(OcppTrafficStaleError):
+        cp._raise_if_ocpp_traffic_stale()
+
+
+def test_raise_if_ocpp_traffic_stale_allows_recent_traffic(hass):
+    """Test recent OCPP traffic keeps the websocket open."""
+    cp = _mk_cp(hass)
+
+    cp._raise_if_ocpp_traffic_stale()
 
 
 def test_connector_aware_metrics_core():

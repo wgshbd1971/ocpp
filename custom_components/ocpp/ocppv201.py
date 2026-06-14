@@ -496,6 +496,7 @@ class ChargePoint(cp):
 
     async def reset(self, typ: str = ""):
         """Hard reset charger unless soft reset requested."""
+        _LOGGER.info("Sending OCPP Reset to '%s' with type=Immediate", self.id)
         req: call.Reset = call.Reset(ResetEnumType.immediate)
         resp = await self.call(req)
         if resp.status != ResetStatusEnumType.accepted.value:

@@ -57,9 +57,9 @@ class DummyCP:
         self.calls.append(("stop_transaction", {}))
         return True
 
-    async def reset(self):
+    async def reset(self, typ=None):
         """Reset."""
-        self.calls.append(("reset", {}))
+        self.calls.append(("reset", {"typ": typ}))
         return True
 
     async def unlock(self, connector_id=None):
@@ -286,6 +286,7 @@ async def test_setters_when_missing_and_present(hass):
     )
     await cs.set_charger_state("test_cpid", csvcs.service_charge_stop.name)
     await cs.set_charger_state("test_cpid", csvcs.service_reset.name)
+    await cs.set_charger_state("test_cpid", csvcs.service_soft_reset.name)
     await cs.set_charger_state("test_cpid", csvcs.service_unlock.name, connector_id=3)
     kinds = [
         k
@@ -306,6 +307,8 @@ async def test_setters_when_missing_and_present(hass):
         "reset",
         "unlock",
     }
+    assert ("reset", {"typ": None}) in cp.calls
+    assert ("reset", {"typ": "Soft"}) in cp.calls
 
 
 @pytest.mark.asyncio

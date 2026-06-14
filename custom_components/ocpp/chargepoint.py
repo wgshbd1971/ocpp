@@ -55,7 +55,9 @@ from .const import (
     CONFIG,
     DATA_UPDATED,
     DEFAULT_ENERGY_UNIT,
+    DEFAULT_LIVENESS_GRACE_PERIOD,
     DEFAULT_NUM_CONNECTORS,
+    DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
     DEFAULT_POWER_UNIT,
     DEFAULT_MEASURAND,
     DOMAIN,
@@ -66,6 +68,10 @@ from .const import (
 
 TIME_MINUTES = UnitOfTime.MINUTES
 _LOGGER: logging.Logger = logging.getLogger(__package__)
+
+
+class OcppTrafficStaleError(Exception):
+    """Raised when websocket ping/pong works but OCPP traffic has stopped."""
 
 
 class Metric:
@@ -270,6 +276,7 @@ class ChargePoint(cp):
         self._post_connect_lock = asyncio.Lock()
         self.tasks = None
         self._charger_reports_session_energy = False
+        self._last_ocpp_message_at = time.monotonic()
 
         # Connector-aware, but backwards compatible:
         self._metrics: _ConnectorAwareMetrics = _ConnectorAwareMetrics()
@@ -299,6 +306,10 @@ class ChargePoint(cp):
 
     async def get_heartbeat_interval(self):
         """Retrieve heartbeat interval from the charger and store it."""
+        pass
+
+    async def request_heartbeat_interval(self):
+        """Request a shorter charger heartbeat interval if supported."""
         pass
 
     async def get_supported_measurands(self) -> str:
@@ -360,6 +371,7 @@ class ChargePoint(cp):
                 self._init_connector_slots(conn)
             self._metrics[(0, cdet.connectors.value)].value = self.num_connectors
             await self.get_heartbeat_interval()
+            await self.request_heartbeat_interval()
 
             await self.get_supported_measurands()
 
@@ -459,11 +471,50 @@ class ChargePoint(cp):
         # This code 'unsilences' CallErrors by raising them as exception
         # upon receiving.
         resp = await super()._get_specific_response(unique_id, timeout)
+        self._mark_ocpp_message()
 
         if isinstance(resp, CallError):
             raise resp.to_exception()
 
         return resp
+
+    def _mark_ocpp_message(self) -> None:
+        """Record that the charger sent a valid OCPP frame."""
+        self._last_ocpp_message_at = time.monotonic()
+        if self.status == STATE_UNAVAILABLE:
+            self.status = STATE_OK
+
+    def is_recently_seen(self) -> bool:
+        """Return true while recent valid OCPP traffic proves the charger is alive."""
+        return (
+            time.monotonic() - self._last_ocpp_message_at
+            <= DEFAULT_LIVENESS_GRACE_PERIOD
+        )
+
+    def _ocpp_traffic_stale_period(self) -> float:
+        """Return stale OCPP traffic timeout for this connection."""
+        return max(
+            DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
+            self.cs_settings.websocket_ping_interval * 3,
+        )
+
+    def _raise_if_ocpp_traffic_stale(self) -> None:
+        """Force reconnect when ping works but no valid OCPP traffic arrives."""
+        stale_for = time.monotonic() - self._last_ocpp_message_at
+        stale_after = self._ocpp_traffic_stale_period()
+        if stale_for <= stale_after:
+            return
+
+        msg = (
+            f"no valid OCPP message for {stale_for:.1f}s "
+            f"(threshold {stale_after:.1f}s)"
+        )
+        _LOGGER.debug(
+            "OCPP traffic stale for '%s': %s; closing websocket to force reconnect",
+            self.id,
+            msg,
+        )
+        raise OcppTrafficStaleError(msg)
 
     async def monitor_connection(self):
         """Monitor the connection, by measuring the connection latency."""
@@ -503,7 +554,10 @@ class ChargePoint(cp):
                 )
                 self._metrics[(0, cstat.latency_ping.value)].value = latency_ping
                 self._metrics[(0, cstat.latency_pong.value)].value = latency_pong
+                self._raise_if_ocpp_traffic_stale()
 
+            except OcppTrafficStaleError:
+                raise
             except TimeoutError as timeout_exception:
                 timeout_counter += 1
                 _LOGGER.debug(
@@ -549,6 +603,7 @@ class ChargePoint(cp):
 
     async def _handle_call(self, msg):
         try:
+            self._mark_ocpp_message()
             await super()._handle_call(msg)
         except NotImplementedError as e:
             response = msg.create_call_error(e).to_json()
@@ -563,6 +618,7 @@ class ChargePoint(cp):
         connection = self._connection
         run_tasks = [asyncio.ensure_future(task) for task in tasks]
         self.tasks = run_tasks
+        close_reason = "connection_task_cleanup"
         try:
             done, _pending = await asyncio.wait(
                 run_tasks, return_when=asyncio.FIRST_COMPLETED
@@ -572,18 +628,43 @@ class ChargePoint(cp):
                     continue
                 exception = task.exception()
                 if exception is None:
+                    close_reason = "connection_task_completed"
                     _LOGGER.debug(
-                        "Connection task completed for '%s'; closing websocket",
+                        "Connection task completed for '%s'; close_reason=%s",
                         self.id,
+                        close_reason,
+                    )
+                elif isinstance(exception, OcppTrafficStaleError):
+                    close_reason = "ocpp_traffic_stale"
+                    _LOGGER.debug(
+                        "Connection task detected stale OCPP traffic for '%s'; "
+                        "close_reason=%s; exception=%s",
+                        self.id,
+                        close_reason,
+                        exception,
                     )
                 elif isinstance(exception, TimeoutError):
-                    pass
-                elif isinstance(exception, WebSocketException):
-                    _LOGGER.debug("Connection closed to '%s': %s", self.id, exception)
-                else:
-                    _LOGGER.error(
-                        "Unexpected exception in connection to '%s': '%s'",
+                    close_reason = "ping_timeout"
+                    _LOGGER.debug(
+                        "Connection task timed out for '%s'; close_reason=%s",
                         self.id,
+                        close_reason,
+                    )
+                elif isinstance(exception, WebSocketException):
+                    close_reason = f"websocket_exception:{type(exception).__name__}"
+                    _LOGGER.debug(
+                        "Connection closed to '%s'; close_reason=%s; exception=%s",
+                        self.id,
+                        close_reason,
+                        exception,
+                    )
+                else:
+                    close_reason = f"unexpected_exception:{type(exception).__name__}"
+                    _LOGGER.error(
+                        "Unexpected exception in connection to '%s'; "
+                        "close_reason=%s; exception='%s'",
+                        self.id,
+                        close_reason,
                         exception,
                         exc_info=(
                             type(exception),
@@ -594,22 +675,38 @@ class ChargePoint(cp):
         except asyncio.CancelledError:
             raise
         except TimeoutError:
-            pass
+            close_reason = "run_timeout"
         except WebSocketException as websocket_exception:
-            _LOGGER.debug(f"Connection closed to '{self.id}': {websocket_exception}")
+            close_reason = (
+                f"run_websocket_exception:{type(websocket_exception).__name__}"
+            )
+            _LOGGER.debug(
+                "Connection closed to '%s'; close_reason=%s; exception=%s",
+                self.id,
+                close_reason,
+                websocket_exception,
+            )
         except Exception as other_exception:
+            close_reason = f"run_unexpected_exception:{type(other_exception).__name__}"
             _LOGGER.error(
-                f"Unexpected exception in connection to '{self.id}': '{other_exception}'",
+                "Unexpected exception in connection to '%s'; "
+                "close_reason=%s; exception='%s'",
+                self.id,
+                close_reason,
+                other_exception,
                 exc_info=True,
             )
         finally:
-            await self.stop(connection=connection, tasks=run_tasks)
+            await self.stop(
+                connection=connection, tasks=run_tasks, close_reason=close_reason
+            )
 
     async def stop(
         self,
         connection: ServerConnection | None = None,
         tasks=None,
         mark_unavailable: bool = True,
+        close_reason: str = "unspecified",
     ):
         """Close connection and cancel ongoing tasks."""
         target_connection = connection or self._connection
@@ -620,8 +717,15 @@ class ChargePoint(cp):
             async_dispatcher_send(self.hass, DATA_UPDATED)
 
         if target_connection.state is State.OPEN:
-            _LOGGER.debug(f"Closing websocket to '{self.id}'")
+            _LOGGER.debug(
+                "Closing websocket to '%s'; close_reason=%s; owns_current_connection=%s",
+                self.id,
+                close_reason,
+                owns_current_connection,
+            )
             await target_connection.close()
+        else:
+            self._abort_stale_connection(target_connection, close_reason=close_reason)
 
         target_tasks = tasks if tasks is not None else self.tasks
         if target_tasks:
@@ -635,6 +739,22 @@ class ChargePoint(cp):
             if pending_tasks:
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
 
+    def _abort_stale_connection(
+        self, connection: ServerConnection, close_reason: str = "unspecified"
+    ):
+        """Release a broken websocket transport if the client vanished untidily."""
+        transport = getattr(connection, "transport", None)
+        if transport is None or transport.is_closing():
+            return
+
+        _LOGGER.debug(
+            "Aborting stale websocket to '%s'; close_reason=%s; state=%s",
+            self.id,
+            close_reason,
+            connection.state,
+        )
+        transport.abort()
+
     async def reconnect(self, connection: ServerConnection):
         """Reconnect charge point."""
         _LOGGER.debug(f"Reconnect websocket to {self.id}")
@@ -647,6 +767,7 @@ class ChargePoint(cp):
             connection=old_connection,
             tasks=old_tasks,
             mark_unavailable=False,
+            close_reason="replaced_by_new_connection",
         )
         self._metrics[(0, cstat.reconnects.value)].value += 1
         self.hass.async_create_task(self.update(self.settings.cpid))

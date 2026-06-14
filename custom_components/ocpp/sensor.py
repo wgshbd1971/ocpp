@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 import homeassistant
 from homeassistant.components.sensor import (
     DOMAIN as SENSOR_DOMAIN,
@@ -322,6 +323,8 @@ class ChargePointMetric(RestoreSensor, SensorEntity):
             return self._attr_native_value
 
         if value is not None:
+            if not isinstance(value, str | int | float | bool | date | datetime):
+                return self._attr_native_value
             self._attr_native_value = value
         return self._attr_native_value
 

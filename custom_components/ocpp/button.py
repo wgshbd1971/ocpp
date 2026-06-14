@@ -40,10 +40,18 @@ class OcppButtonDescription(ButtonEntityDescription):
 BUTTONS: Final = [
     OcppButtonDescription(
         key="reset",
-        name="Reset",
+        name="Hard Reset",
         device_class=ButtonDeviceClass.RESTART,
         entity_category=EntityCategory.CONFIG,
         press_action=HAChargerServices.service_reset.name,
+        per_connector=False,
+    ),
+    OcppButtonDescription(
+        key="soft_reset",
+        name="Soft Reset",
+        device_class=ButtonDeviceClass.RESTART,
+        entity_category=EntityCategory.CONFIG,
+        press_action=HAChargerServices.service_soft_reset.name,
         per_connector=False,
     ),
     OcppButtonDescription(
