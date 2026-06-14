@@ -16,6 +16,7 @@ from custom_components.ocpp.chargepoint import (
     ChargePoint,
     OcppVersion,
     Metric,
+    OcppTrafficStaleError,
     _ConnectorAwareMetrics as CAM,
     MeasurandValue,
 )
@@ -24,6 +25,7 @@ from custom_components.ocpp.const import (
     CentralSystemSettings,
     ChargerSystemSettings,
     DEFAULT_LIVENESS_GRACE_PERIOD,
+    DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
     DEFAULT_ENERGY_UNIT,
     DEFAULT_POWER_UNIT,
     HA_ENERGY_UNIT,
@@ -142,6 +144,39 @@ def test_recently_seen_expires(hass):
     cp._last_ocpp_message_at = time.monotonic() - DEFAULT_LIVENESS_GRACE_PERIOD - 1
 
     assert cp.is_recently_seen() is False
+
+
+def test_ocpp_traffic_stale_period_has_floor(hass):
+    """Test stale OCPP traffic timeout is conservative by default."""
+    cp = _mk_cp(hass)
+
+    assert cp._ocpp_traffic_stale_period() == DEFAULT_OCPP_TRAFFIC_STALE_PERIOD
+
+
+def test_ocpp_traffic_stale_period_scales_with_ping_interval(hass):
+    """Test stale OCPP traffic timeout scales for slower ping intervals."""
+    cp = _mk_cp(hass)
+    cp.cs_settings.websocket_ping_interval = 100
+
+    assert cp._ocpp_traffic_stale_period() == 300
+
+
+def test_raise_if_ocpp_traffic_stale_raises(hass):
+    """Test stale OCPP traffic forces a reconnect path."""
+    cp = _mk_cp(hass)
+    cp._last_ocpp_message_at = (
+        time.monotonic() - DEFAULT_OCPP_TRAFFIC_STALE_PERIOD - 1
+    )
+
+    with pytest.raises(OcppTrafficStaleError):
+        cp._raise_if_ocpp_traffic_stale()
+
+
+def test_raise_if_ocpp_traffic_stale_allows_recent_traffic(hass):
+    """Test recent OCPP traffic keeps the websocket open."""
+    cp = _mk_cp(hass)
+
+    cp._raise_if_ocpp_traffic_stale()
 
 
 def test_connector_aware_metrics_core():

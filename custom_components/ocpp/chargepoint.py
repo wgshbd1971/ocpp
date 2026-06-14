@@ -57,6 +57,7 @@ from .const import (
     DEFAULT_ENERGY_UNIT,
     DEFAULT_LIVENESS_GRACE_PERIOD,
     DEFAULT_NUM_CONNECTORS,
+    DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
     DEFAULT_POWER_UNIT,
     DEFAULT_MEASURAND,
     DOMAIN,
@@ -67,6 +68,10 @@ from .const import (
 
 TIME_MINUTES = UnitOfTime.MINUTES
 _LOGGER: logging.Logger = logging.getLogger(__package__)
+
+
+class OcppTrafficStaleError(Exception):
+    """Raised when websocket ping/pong works but OCPP traffic has stopped."""
 
 
 class Metric:
@@ -486,6 +491,31 @@ class ChargePoint(cp):
             <= DEFAULT_LIVENESS_GRACE_PERIOD
         )
 
+    def _ocpp_traffic_stale_period(self) -> float:
+        """Return stale OCPP traffic timeout for this connection."""
+        return max(
+            DEFAULT_OCPP_TRAFFIC_STALE_PERIOD,
+            self.cs_settings.websocket_ping_interval * 3,
+        )
+
+    def _raise_if_ocpp_traffic_stale(self) -> None:
+        """Force reconnect when ping works but no valid OCPP traffic arrives."""
+        stale_for = time.monotonic() - self._last_ocpp_message_at
+        stale_after = self._ocpp_traffic_stale_period()
+        if stale_for <= stale_after:
+            return
+
+        msg = (
+            f"no valid OCPP message for {stale_for:.1f}s "
+            f"(threshold {stale_after:.1f}s)"
+        )
+        _LOGGER.debug(
+            "OCPP traffic stale for '%s': %s; closing websocket to force reconnect",
+            self.id,
+            msg,
+        )
+        raise OcppTrafficStaleError(msg)
+
     async def monitor_connection(self):
         """Monitor the connection, by measuring the connection latency."""
         self._metrics[(0, cstat.latency_ping.value)].unit = "ms"
@@ -524,7 +554,10 @@ class ChargePoint(cp):
                 )
                 self._metrics[(0, cstat.latency_ping.value)].value = latency_ping
                 self._metrics[(0, cstat.latency_pong.value)].value = latency_pong
+                self._raise_if_ocpp_traffic_stale()
 
+            except OcppTrafficStaleError:
+                raise
             except TimeoutError as timeout_exception:
                 timeout_counter += 1
                 _LOGGER.debug(
@@ -600,6 +633,15 @@ class ChargePoint(cp):
                         "Connection task completed for '%s'; close_reason=%s",
                         self.id,
                         close_reason,
+                    )
+                elif isinstance(exception, OcppTrafficStaleError):
+                    close_reason = "ocpp_traffic_stale"
+                    _LOGGER.debug(
+                        "Connection task detected stale OCPP traffic for '%s'; "
+                        "close_reason=%s; exception=%s",
+                        self.id,
+                        close_reason,
+                        exception,
                     )
                 elif isinstance(exception, TimeoutError):
                     close_reason = "ping_timeout"
